@@ -1,0 +1,5 @@
+# Data files
+/models/
+/venv/
+/env/
+/tf-env/
