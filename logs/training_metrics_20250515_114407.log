@@ -1,0 +1,174 @@
+2025-05-15 11:44:07,437 - __main__ - INFO - Inicializando modelo de predicción de géneros...
+2025-05-15 11:44:07,438 - __main__ - INFO - Preparando datos...
+2025-05-15 11:44:10,058 - models.genre_predictor - INFO - 
+Creando matriz usuario-género:
+2025-05-15 11:44:10,058 - models.genre_predictor - INFO - Número total de usuarios: 610
+2025-05-15 11:44:10,058 - models.genre_predictor - INFO - Número total de géneros: 20
+2025-05-15 11:44:10,059 - models.genre_predictor - INFO - 
+Géneros disponibles:
+2025-05-15 11:44:10,059 - models.genre_predictor - INFO - - (no genres listed)
+2025-05-15 11:44:10,065 - models.genre_predictor - INFO - - Action
+2025-05-15 11:44:10,065 - models.genre_predictor - INFO - - Adventure
+2025-05-15 11:44:10,066 - models.genre_predictor - INFO - - Animation
+2025-05-15 11:44:10,066 - models.genre_predictor - INFO - - Children
+2025-05-15 11:44:10,066 - models.genre_predictor - INFO - - Comedy
+2025-05-15 11:44:10,066 - models.genre_predictor - INFO - - Crime
+2025-05-15 11:44:10,066 - models.genre_predictor - INFO - - Documentary
+2025-05-15 11:44:10,066 - models.genre_predictor - INFO - - Drama
+2025-05-15 11:44:10,066 - models.genre_predictor - INFO - - Fantasy
+2025-05-15 11:44:10,066 - models.genre_predictor - INFO - - Film-Noir
+2025-05-15 11:44:10,066 - models.genre_predictor - INFO - - Horror
+2025-05-15 11:44:10,066 - models.genre_predictor - INFO - - IMAX
+2025-05-15 11:44:10,066 - models.genre_predictor - INFO - - Musical
+2025-05-15 11:44:10,066 - models.genre_predictor - INFO - - Mystery
+2025-05-15 11:44:10,067 - models.genre_predictor - INFO - - Romance
+2025-05-15 11:44:10,067 - models.genre_predictor - INFO - - Sci-Fi
+2025-05-15 11:44:10,067 - models.genre_predictor - INFO - - Thriller
+2025-05-15 11:44:10,067 - models.genre_predictor - INFO - - War
+2025-05-15 11:44:10,067 - models.genre_predictor - INFO - - Western
+2025-05-15 11:44:10,069 - models.genre_predictor - INFO - 
+Matriz de entrenamiento (user_genre_matrix):
+2025-05-15 11:44:10,069 - models.genre_predictor - INFO - Dimensiones: (610, 20)
+2025-05-15 11:44:10,081 - models.genre_predictor - INFO - Dimensiones:         (no genres listed)    Action  Adventure  Animation  Children    Comedy     Crime  Documentary     Drama   Fantasy  Film-Noir    Horror      IMAX   Musical   Mystery   Romance    Sci-Fi  Thriller       War   Western
+userId                                                                                                                                                                                                                        
+1                      0.0  1.655319   1.587234   0.591489  0.825532  1.527660  0.851064     0.000000  1.327660  0.872340   0.021277  0.268085  0.000000  0.451064  0.319149  0.476596  0.719149  0.970213  0.421277  0.127660
+2                      0.0  1.500000   0.431034   0.000000  0.000000  0.965517  1.310345     0.448276  2.275862  0.000000   0.000000  0.103448  0.517241  0.000000  0.275862  0.155172  0.534483  1.275862  0.155172  0.120690
+3                      0.0  1.282051   0.769231   0.051282  0.064103  0.230769  0.025641     0.000000  0.307692  0.346154   0.000000  0.961538  0.000000  0.012821  0.128205  0.064103  1.615385  0.743590  0.064103  0.000000
+4                      0.0  0.384259   0.490741   0.111111  0.175926  1.689815  0.476852     0.037037  1.935185  0.324074   0.074074  0.078704  0.013889  0.296296  0.370370  0.907407  0.157407  0.625000  0.115741  0.175926
+5                      0.0  0.636364   0.590909   0.590909  0.840909  1.181818  1.045455     0.000000  2.159091  0.659091   0.000000  0.068182  0.250000  0.500000  0.090909  0.772727  0.113636  0.727273  0.227273  0.136364
+...                    ...       ...        ...        ...       ...       ...       ...          ...       ...       ...        ...       ...       ...       ...       ...       ...       ...       ...       ...       ...
+606                    0.0  0.430493   0.461883   0.139910  0.151570  1.346188  0.435874     0.017040  2.371300  0.313004   0.027354  0.156054  0.043946  0.147085  0.309417  1.191031  0.252018  0.629148  0.221076  0.052018
+607                    0.0  1.433155   0.834225   0.106952  0.347594  0.978610  0.550802     0.000000  1.759358  0.401070   0.000000  0.770053  0.026738  0.096257  0.422460  0.545455  0.625668  1.342246  0.133690  0.042781
+608                    0.0  1.110108   0.701564   0.206378  0.260529  1.169073  0.634777     0.021661  1.158243  0.400722   0.018051  0.387485  0.057762  0.109507  0.294826  0.368231  0.662455  1.102286  0.081829  0.034898
+609                    0.0  0.918919   0.864865   0.081081  0.162162  0.621622  0.567568     0.162162  1.729730  0.081081   0.000000  0.189189  0.081081  0.000000  0.000000  0.432432  0.405405  1.243243  0.378378  0.108108
+610                    0.0  1.429724   0.759985   0.197773  0.157066  1.177803  0.796851     0.016129  1.425499  0.416667   0.033410  0.816052  0.228495  0.042243  0.347158  0.341014  0.705453  1.399770  0.136329  0.094854
+
+[610 rows x 20 columns]
+2025-05-15 11:44:10,082 - models.genre_predictor - INFO - 
+Estadísticas por género:
+2025-05-15 11:44:10,107 - models.genre_predictor - INFO - 
+       (no genres listed)      Action   Adventure   Animation    Children      Comedy       Crime  Documentary  ...        IMAX     Musical     Mystery     Romance      Sci-Fi    Thriller         War     Western
+count          610.000000  610.000000  610.000000  610.000000  610.000000  610.000000  610.000000   610.000000  ...  610.000000  610.000000  610.000000  610.000000  610.000000  610.000000  610.000000  610.000000
+mean             0.001214    1.160415    0.951559    0.264784    0.331213    1.262325    0.670233     0.033293  ...    0.180262    0.147999    0.289549    0.681267    0.635438    1.020519    0.224014    0.077320
+std              0.009499    0.621266    0.539164    0.294391    0.310805    0.524400    0.381053     0.084206  ...    0.251501    0.178257    0.188287    0.392691    0.436456    0.460162    0.190179    0.098667
+min              0.000000    0.000000    0.000000    0.000000    0.000000    0.000000    0.000000     0.000000  ...    0.000000    0.000000    0.000000    0.000000    0.000000    0.000000    0.000000    0.000000
+25%              0.000000    0.724136    0.587945    0.081127    0.123463    0.909318    0.421540     0.000000  ...    0.004582    0.023589    0.159533    0.404811    0.333333    0.717815    0.108068    0.000000
+50%              0.000000    1.085052    0.866956    0.187246    0.251866    1.206576    0.617235     0.000000  ...    0.102007    0.101136    0.269409    0.611111    0.555975    0.993772    0.181818    0.050564
+75%              0.000000    1.500000    1.212866    0.364171    0.464444    1.524553    0.848169     0.029512  ...    0.235531    0.205103    0.378311    0.857487    0.818571    1.311384    0.297903    0.113187
+max              0.166667    3.861111    3.709677    2.583333    2.655172    3.324841    2.512048     0.904762  ...    2.096774    1.648649    1.188889    3.000000    3.122642    3.032934    1.636364    1.129630
+
+[8 rows x 20 columns]
+2025-05-15 11:44:10,107 - models.genre_predictor - INFO - 
+Ejemplos de preferencias de géneros para algunos usuarios:
+2025-05-15 11:44:10,108 - models.genre_predictor - INFO - 
+Usuario 1:
+2025-05-15 11:44:10,108 - models.genre_predictor - INFO - - Action: 1.66
+2025-05-15 11:44:10,109 - models.genre_predictor - INFO - - Adventure: 1.59
+2025-05-15 11:44:10,109 - models.genre_predictor - INFO - - Comedy: 1.53
+2025-05-15 11:44:10,109 - models.genre_predictor - INFO - 
+Usuario 2:
+2025-05-15 11:44:10,109 - models.genre_predictor - INFO - - Drama: 2.28
+2025-05-15 11:44:10,109 - models.genre_predictor - INFO - - Action: 1.50
+2025-05-15 11:44:10,109 - models.genre_predictor - INFO - - Crime: 1.31
+2025-05-15 11:44:10,110 - models.genre_predictor - INFO - 
+Usuario 3:
+2025-05-15 11:44:10,110 - models.genre_predictor - INFO - - Sci-Fi: 1.62
+2025-05-15 11:44:10,110 - models.genre_predictor - INFO - - Action: 1.28
+2025-05-15 11:44:10,110 - models.genre_predictor - INFO - - Horror: 0.96
+2025-05-15 11:44:10,129 - __main__ - INFO - Entrenando modelo...
+2025-05-15 11:44:10,777 - models.genre_predictor - INFO - Epoch [10/50]:
+2025-05-15 11:44:10,777 - models.genre_predictor - INFO -   Loss: 0.1713
+2025-05-15 11:44:10,777 - models.genre_predictor - INFO -   MSE: 0.1713
+2025-05-15 11:44:10,777 - models.genre_predictor - INFO -   RMSE: 0.4135
+2025-05-15 11:44:10,993 - models.genre_predictor - INFO - Epoch [20/50]:
+2025-05-15 11:44:10,993 - models.genre_predictor - INFO -   Loss: 0.1508
+2025-05-15 11:44:10,993 - models.genre_predictor - INFO -   MSE: 0.1508
+2025-05-15 11:44:10,993 - models.genre_predictor - INFO -   RMSE: 0.3879
+2025-05-15 11:44:11,219 - models.genre_predictor - INFO - Epoch [30/50]:
+2025-05-15 11:44:11,219 - models.genre_predictor - INFO -   Loss: 0.1367
+2025-05-15 11:44:11,219 - models.genre_predictor - INFO -   MSE: 0.1367
+2025-05-15 11:44:11,219 - models.genre_predictor - INFO -   RMSE: 0.3693
+2025-05-15 11:44:11,441 - models.genre_predictor - INFO - Epoch [40/50]:
+2025-05-15 11:44:11,441 - models.genre_predictor - INFO -   Loss: 0.1278
+2025-05-15 11:44:11,441 - models.genre_predictor - INFO -   MSE: 0.1278
+2025-05-15 11:44:11,442 - models.genre_predictor - INFO -   RMSE: 0.3570
+2025-05-15 11:44:11,664 - models.genre_predictor - INFO - Epoch [50/50]:
+2025-05-15 11:44:11,664 - models.genre_predictor - INFO -   Loss: 0.1181
+2025-05-15 11:44:11,664 - models.genre_predictor - INFO -   MSE: 0.1181
+2025-05-15 11:44:11,665 - models.genre_predictor - INFO -   RMSE: 0.3430
+2025-05-15 11:44:11,665 - models.genre_predictor - INFO - 
+Métricas finales de entrenamiento:
+2025-05-15 11:44:11,665 - models.genre_predictor - INFO - Loss final: 0.1181
+2025-05-15 11:44:11,665 - models.genre_predictor - INFO - MSE final: 0.1181
+2025-05-15 11:44:11,665 - models.genre_predictor - INFO - RMSE final: 0.3430
+2025-05-15 11:44:11,665 - models.genre_predictor - INFO - 
+Evolución de las métricas:
+2025-05-15 11:44:11,665 - models.genre_predictor - INFO - 
+Epoch 1:
+2025-05-15 11:44:11,665 - models.genre_predictor - INFO -   Loss: 3.7503
+2025-05-15 11:44:11,665 - models.genre_predictor - INFO -   MSE: 3.7503
+2025-05-15 11:44:11,665 - models.genre_predictor - INFO -   RMSE: 1.9338
+2025-05-15 11:44:11,665 - models.genre_predictor - INFO - 
+Epoch 11:
+2025-05-15 11:44:11,666 - models.genre_predictor - INFO -   Loss: 0.1665
+2025-05-15 11:44:11,666 - models.genre_predictor - INFO -   MSE: 0.1665
+2025-05-15 11:44:11,666 - models.genre_predictor - INFO -   RMSE: 0.4074
+2025-05-15 11:44:11,666 - models.genre_predictor - INFO - 
+Epoch 21:
+2025-05-15 11:44:11,666 - models.genre_predictor - INFO -   Loss: 0.1513
+2025-05-15 11:44:11,666 - models.genre_predictor - INFO -   MSE: 0.1513
+2025-05-15 11:44:11,666 - models.genre_predictor - INFO -   RMSE: 0.3882
+2025-05-15 11:44:11,666 - models.genre_predictor - INFO - 
+Epoch 31:
+2025-05-15 11:44:11,666 - models.genre_predictor - INFO -   Loss: 0.1332
+2025-05-15 11:44:11,666 - models.genre_predictor - INFO -   MSE: 0.1332
+2025-05-15 11:44:11,666 - models.genre_predictor - INFO -   RMSE: 0.3641
+2025-05-15 11:44:11,666 - models.genre_predictor - INFO - 
+Epoch 41:
+2025-05-15 11:44:11,666 - models.genre_predictor - INFO -   Loss: 0.1272
+2025-05-15 11:44:11,667 - models.genre_predictor - INFO -   MSE: 0.1272
+2025-05-15 11:44:11,667 - models.genre_predictor - INFO -   RMSE: 0.3562
+2025-05-15 11:44:11,667 - __main__ - INFO - Guardando modelo...
+2025-05-15 11:44:11,669 - models.genre_predictor - INFO - Modelo guardado en models/genre_predictor.pth
+2025-05-15 11:44:11,669 - __main__ - INFO - 
+Evaluando modelo...
+2025-05-15 11:44:11,672 - models.genre_predictor - INFO - 
+Métricas de evaluación:
+2025-05-15 11:44:11,672 - models.genre_predictor - INFO - MSE promedio: 0.4676
+2025-05-15 11:44:11,672 - models.genre_predictor - INFO - RMSE promedio: 0.6801
+2025-05-15 11:44:11,679 - __main__ - INFO - 
+==================================================
+2025-05-15 11:44:11,679 - __main__ - INFO - MÉTRICAS FINALES DEL MODELO
+2025-05-15 11:44:11,679 - __main__ - INFO - ==================================================
+2025-05-15 11:44:11,679 - __main__ - INFO - MSE: 0.4676
+2025-05-15 11:44:11,680 - __main__ - INFO - RMSE: 0.6801
+2025-05-15 11:44:11,680 - __main__ - INFO - 
+Las métricas detalladas se han guardado en: logs\final_metrics_20250515_114407.json
+2025-05-15 11:44:11,680 - __main__ - INFO - ==================================================
+2025-05-15 11:44:11,680 - __main__ - INFO - 
+Predicciones de ejemplo:
+2025-05-15 11:44:11,680 - __main__ - INFO - 
+Predicciones para usuario 1:
+2025-05-15 11:44:11,681 - __main__ - INFO - - Action: 1.54
+2025-05-15 11:44:11,681 - __main__ - INFO - - Drama: 1.49
+2025-05-15 11:44:11,681 - __main__ - INFO - - Adventure: 1.34
+2025-05-15 11:44:11,681 - __main__ - INFO - 
+Predicciones para usuario 2:
+2025-05-15 11:44:11,681 - __main__ - INFO - - Drama: 1.76
+2025-05-15 11:44:11,681 - __main__ - INFO - - Action: 1.22
+2025-05-15 11:44:11,682 - __main__ - INFO - - Thriller: 1.10
+2025-05-15 11:44:11,682 - __main__ - INFO - 
+Predicciones para usuario 3:
+2025-05-15 11:44:11,682 - __main__ - INFO - - Action: 1.45
+2025-05-15 11:44:11,682 - __main__ - INFO - - Drama: 1.36
+2025-05-15 11:44:11,682 - __main__ - INFO - - Adventure: 1.15
+2025-05-15 11:44:11,683 - __main__ - INFO - 
+Predicciones para usuario 4:
+2025-05-15 11:44:11,683 - __main__ - INFO - - Drama: 2.11
+2025-05-15 11:44:11,683 - __main__ - INFO - - Comedy: 1.15
+2025-05-15 11:44:11,683 - __main__ - INFO - - Thriller: 1.04
+2025-05-15 11:44:11,683 - __main__ - INFO - 
+Predicciones para usuario 5:
+2025-05-15 11:44:11,683 - __main__ - INFO - - Drama: 1.61
+2025-05-15 11:44:11,683 - __main__ - INFO - - Comedy: 1.28
+2025-05-15 11:44:11,684 - __main__ - INFO - - Action: 0.99

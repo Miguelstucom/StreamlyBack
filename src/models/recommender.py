@@ -189,255 +189,197 @@ class MovieRecommenderDL:
             
             # Create movies DataFrame
             self.movies_df = pd.DataFrame(movies_data, columns=['movieId', 'title', 'overview'])
+            
+            # Get user and rating data from database
+            cursor.execute('SELECT user_id, movie_id, rating FROM ratings')
+            ratings_data = cursor.fetchall()
+            ratings_df = pd.DataFrame(ratings_data, columns=['userId', 'movieId', 'rating'])
+            
+            # Create user-movie matrix
+            self.user_movie_matrix = ratings_df.pivot(
+                index='userId',
+                columns='movieId',
+                values='rating'
+            ).fillna(0)
+            
+            # Create user and movie mappings
+            self.user_to_idx = {user: idx for idx, user in enumerate(self.user_movie_matrix.index)}
+            self.movie_to_idx = {movie: idx for idx, movie in enumerate(self.user_movie_matrix.columns)}
         finally:
             conn.close()
-        
-        # Get user and rating data from CSV
-        self.user_movie_matrix = data['user_movie_matrix']
-        self.user_to_idx = data['user_to_idx']
-        self.movie_to_idx = data['movie_to_idx']
 
         # Entrenar modelo basado en contenido
         self._fit_content_based()
-
+        
         # Entrenar modelo colaborativo
         self._fit_collaborative()
-
+        
         logger.info("Entrenamiento completado exitosamente")
 
     def _fit_content_based(self):
         """Entrena el modelo basado en contenido."""
         logger.info("Entrenando modelo basado en contenido...")
-
-        # Preparar características de texto
-        text_features = []
-        for _, row in self.movies_df.iterrows():
-            # Combinar título y descripción
-            features = f"{row['title']} {row['overview']}"
-            text_features.append(features)
-
-        # Convertir características de texto a matriz TF-IDF
-        self.movie_features = self.vectorizer.fit_transform(text_features)
+        
+        # Combine title and overview for content-based features
+        self.movies_df['content'] = self.movies_df['title'] + ' ' + self.movies_df['overview'].fillna('')
+        
+        # Create TF-IDF matrix
+        self.movie_features = self.vectorizer.fit_transform(self.movies_df['content'])
+        
+        # Calculate similarity matrix
         self.movie_similarity = cosine_similarity(self.movie_features)
-
-        logger.info(f"Modelo basado en contenido entrenado con {len(text_features)} películas")
+        
+        logger.info("Modelo basado en contenido entrenado exitosamente")
 
     def _fit_collaborative(self):
-        """Entrena el modelo colaborativo usando una red neuronal."""
+        """Entrena el modelo colaborativo."""
         logger.info("Entrenando modelo colaborativo...")
-
-        # Dividir datos en entrenamiento y prueba (80-20)
-        np.random.seed(42)
-        mask = np.random.rand(self.user_movie_matrix.shape[0], self.user_movie_matrix.shape[1]) < 0.8
-        train_matrix = self.user_movie_matrix.copy()
-        test_matrix = self.user_movie_matrix.copy()
-        train_matrix[~mask] = 0
-        test_matrix[mask] = 0
-
-        # Crear datasets
-        train_dataset = MovieDataset(train_matrix)
-        test_dataset = MovieDataset(test_matrix)
-
-        # Crear dataloaders
-        train_loader = DataLoader(train_dataset, batch_size=1024, shuffle=True)
-        test_loader = DataLoader(test_dataset, batch_size=1024)
-
-        # Inicializar modelo
+        
+        # Create dataset
+        dataset = MovieDataset(self.user_movie_matrix)
+        dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
+        
+        # Initialize model
         num_users = len(self.user_to_idx)
         num_movies = len(self.movie_to_idx)
         self.model = NeuralCF(num_users, num_movies, self.embedding_dim).to(self.device)
         
-        # Definir optimizador y función de pérdida
-        optimizer = optim.Adam(self.model.parameters(), lr=0.001)
+        # Training setup
         criterion = nn.MSELoss()
-
-        # Entrenamiento
-        best_rmse = float('inf')
-        best_metrics = None
-        patience = 5
-        patience_counter = 0
-
+        optimizer = optim.Adam(self.model.parameters(), lr=0.001)
+        
+        # Training loop
+        self.model.train()
         for epoch in range(10):
-            self.model.train()
             total_loss = 0
-            for batch in train_loader:
-                user = batch['user'].to(self.device)
-                movie = batch['movie'].to(self.device)
+            for batch in dataloader:
+                user_input = batch['user'].to(self.device)
+                movie_input = batch['movie'].to(self.device)
                 rating = batch['rating'].to(self.device)
-
+                
                 optimizer.zero_grad()
-                prediction = self.model(user, movie)
-                loss = criterion(prediction, rating)
+                output = self.model(user_input, movie_input)
+                loss = criterion(output, rating)
                 loss.backward()
                 optimizer.step()
+                
                 total_loss += loss.item()
-
-            # Evaluación
-            self.model.eval()
-            predictions = []
-            actuals = []
-            with torch.no_grad():
-                for batch in test_loader:
-                    user = batch['user'].to(self.device)
-                    movie = batch['movie'].to(self.device)
-                    rating = batch['rating'].to(self.device)
-                    
-                    prediction = self.model(user, movie)
-                    predictions.extend(prediction.cpu().numpy())
-                    actuals.extend(rating.cpu().numpy())
-
-            predictions = np.array(predictions)
-            actuals = np.array(actuals)
-
-            # Calcular métricas
-            metrics = {
-                'mse': mean_squared_error(actuals, predictions),
-                'rmse': np.sqrt(mean_squared_error(actuals, predictions))
-            }
-
-            # Métricas de clasificación
-            actuals_binary = (actuals >= 4).astype(int)
-            predictions_binary = (predictions >= 4).astype(int)
-
-            if np.sum(actuals_binary) > 0:
-                metrics.update({
-                    'accuracy': accuracy_score(actuals_binary, predictions_binary),
-                    'precision': precision_score(actuals_binary, predictions_binary, zero_division=0),
-                    'recall': recall_score(actuals_binary, predictions_binary, zero_division=0),
-                    'f1_score': f1_score(actuals_binary, predictions_binary, zero_division=0)
-                })
-
-            # Precision@k
-            if len(actuals) >= 10:
-                metrics['precision@10'] = precision_at_k(actuals, predictions, k=10)
-            if len(actuals) >= 5:
-                metrics['precision@5'] = precision_at_k(actuals, predictions, k=5)
-
-            logger.info(f"Epoch {epoch + 1}/50 - Loss: {total_loss/len(train_loader):.4f} - RMSE: {metrics['rmse']:.4f}")
-
-            # Early stopping
-            if metrics['rmse'] < best_rmse:
-                best_rmse = metrics['rmse']
-                best_metrics = metrics
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    logger.info("Early stopping triggered")
-                    break
-
-        self.metrics = best_metrics
+            
+            logger.info(f"Epoch {epoch+1}, Loss: {total_loss/len(dataloader):.4f}")
+        
         logger.info("Modelo colaborativo entrenado exitosamente")
-        logger.info("Métricas finales:")
-        for metric, value in best_metrics.items():
-            logger.info(f"{metric}: {value:.4f}")
 
     def get_content_based_recommendations(self, movie_id: int, n_recommendations: int = 5) -> List[Dict]:
-        """Obtiene recomendaciones basadas en contenido para una película específica."""
-        if self.movie_similarity is None:
-            raise ValueError("El modelo debe ser entrenado antes de hacer recomendaciones")
-
-        movie_idx = self.movies_df[self.movies_df['movieId'] == movie_id].index[0]
-        similarity_scores = self.movie_similarity[movie_idx]
-        similar_indices = similarity_scores.argsort()[::-1][1:n_recommendations + 1]
-
-        recommendations = []
-        for idx in similar_indices:
-            movie_id = self.movies_df.iloc[idx]['movieId']
-            movie_data = self._get_movie_data(movie_id)
-            if movie_data:
-                movie_data['similarity_score'] = float(similarity_scores[idx])
-                recommendations.append(movie_data)
-
-        return recommendations
+        """Obtiene recomendaciones basadas en contenido para una película."""
+        try:
+            # Get movie index
+            movie_idx = self.movies_df[self.movies_df['movieId'] == movie_id].index[0]
+            
+            # Get similarity scores
+            similarity_scores = self.movie_similarity[movie_idx]
+            
+            # Get top similar movies
+            similar_indices = similarity_scores.argsort()[::-1][1:n_recommendations+1]
+            similar_movies = self.movies_df.iloc[similar_indices]
+            
+            # Get movie details
+            recommendations = []
+            for _, movie in similar_movies.iterrows():
+                movie_data = self._get_movie_data(movie['movieId'])
+                if movie_data:
+                    recommendations.append(movie_data)
+            
+            return recommendations
+        except Exception as e:
+            logger.error(f"Error getting content-based recommendations: {str(e)}")
+            return []
 
     def get_collaborative_recommendations(self, user_id: int, n_recommendations: int = 5) -> List[Dict]:
-        """Obtiene recomendaciones colaborativas para un usuario específico."""
-        if self.model is None:
-            raise ValueError("El modelo debe ser entrenado antes de hacer recomendaciones")
-
-        if user_id not in self.user_to_idx:
-            raise ValueError(f"Usuario {user_id} no encontrado en el sistema")
-
-        user_idx = self.user_to_idx[user_id]
-        
-        # Obtener películas que el usuario no ha calificado
-        user_movies = set(self.user_movie_matrix.columns[self.user_movie_matrix.iloc[user_idx] > 0])
-        all_movies = set(self.user_movie_matrix.columns)
-        unwatched_movies = list(all_movies - user_movies)
-
-        # Preparar datos para predicción
-        self.model.eval()
-        predictions = []
-        
-        with torch.no_grad():
-            for movie_id in unwatched_movies:
-                movie_idx = self.movie_to_idx[movie_id]
-                user_tensor = torch.tensor([user_idx], dtype=torch.long).to(self.device)
-                movie_tensor = torch.tensor([movie_idx], dtype=torch.long).to(self.device)
-                
-                prediction = self.model(user_tensor, movie_tensor)
-                predictions.append(prediction.item())
-
-        # Obtener las mejores predicciones
-        predictions = np.array(predictions)
-        top_indices = predictions.argsort()[::-1][:n_recommendations]
-
-        # Crear lista de recomendaciones
-        recommendations = []
-        for idx in top_indices:
-            movie_id = unwatched_movies[idx]
-            movie_data = self._get_movie_data(movie_id)
-            if movie_data:
-                movie_data['predicted_rating'] = float(predictions[idx])
-                recommendations.append(movie_data)
-
-        return recommendations
+        """Obtiene recomendaciones colaborativas para un usuario."""
+        try:
+            # Get user index
+            user_idx = self.user_to_idx.get(user_id)
+            if user_idx is None:
+                return []
+            
+            # Get user ratings
+            user_ratings = self.user_movie_matrix.iloc[user_idx]
+            
+            # Get unrated movies
+            unrated_movies = user_ratings[user_ratings == 0].index
+            
+            # Predict ratings for unrated movies
+            predictions = []
+            self.model.eval()
+            with torch.no_grad():
+                for movie_id in unrated_movies:
+                    movie_idx = self.movie_to_idx.get(movie_id)
+                    if movie_idx is not None:
+                        user_input = torch.tensor([user_idx], dtype=torch.long).to(self.device)
+                        movie_input = torch.tensor([movie_idx], dtype=torch.long).to(self.device)
+                        prediction = self.model(user_input, movie_input)
+                        predictions.append((movie_id, prediction.item()))
+            
+            # Sort predictions and get top recommendations
+            predictions.sort(key=lambda x: x[1], reverse=True)
+            top_movies = [movie_id for movie_id, _ in predictions[:n_recommendations]]
+            
+            # Get movie details
+            recommendations = []
+            for movie_id in top_movies:
+                movie_data = self._get_movie_data(movie_id)
+                if movie_data:
+                    recommendations.append(movie_data)
+            
+            return recommendations
+        except Exception as e:
+            logger.error(f"Error getting collaborative recommendations: {str(e)}")
+            return []
 
     def get_worst_collaborative_recommendations(self, user_id: int, n_recommendations: int = 5) -> List[Dict]:
-        """Obtiene las peores recomendaciones colaborativas para un usuario específico."""
-        if self.model is None:
-            raise ValueError("El modelo debe ser entrenado antes de hacer recomendaciones")
-
-        if user_id not in self.user_to_idx:
-            raise ValueError(f"Usuario {user_id} no encontrado en el sistema")
-
-        user_idx = self.user_to_idx[user_id]
-
-        # Obtener películas no vistas por el usuario
-        user_movies = set(self.user_movie_matrix.columns[self.user_movie_matrix.iloc[user_idx] > 0])
-        all_movies = set(self.user_movie_matrix.columns)
-        unwatched_movies = list(all_movies - user_movies)
-
-        # Predecir ratings para películas no vistas
-        self.model.eval()
-        predictions = []
-
-        with torch.no_grad():
-            for movie_id in unwatched_movies:
-                movie_idx = self.movie_to_idx[movie_id]
-                user_tensor = torch.tensor([user_idx], dtype=torch.long).to(self.device)
-                movie_tensor = torch.tensor([movie_idx], dtype=torch.long).to(self.device)
-
-                prediction = self.model(user_tensor, movie_tensor)
-                predictions.append(prediction.item())
-
-        # Obtener las peores predicciones (menor rating)
-        predictions = np.array(predictions)
-        worst_indices = predictions.argsort()[:n_recommendations]  # orden ascendente
-
-        # Crear lista de peores recomendaciones
-        worst_recommendations = []
-        for idx in worst_indices:
-            movie_id = unwatched_movies[idx]
-            movie_data = self._get_movie_data(movie_id)
-            if movie_data:
-                movie_data['predicted_rating'] = float(predictions[idx])
-                worst_recommendations.append(movie_data)
-
-        return worst_recommendations
+        """Obtiene las peores recomendaciones colaborativas para un usuario."""
+        try:
+            # Get user index
+            user_idx = self.user_to_idx.get(user_id)
+            if user_idx is None:
+                return []
+            
+            # Get user ratings
+            user_ratings = self.user_movie_matrix.iloc[user_idx]
+            
+            # Get unrated movies
+            unrated_movies = user_ratings[user_ratings == 0].index
+            
+            # Predict ratings for unrated movies
+            predictions = []
+            self.model.eval()
+            with torch.no_grad():
+                for movie_id in unrated_movies:
+                    movie_idx = self.movie_to_idx.get(movie_id)
+                    if movie_idx is not None:
+                        user_input = torch.tensor([user_idx], dtype=torch.long).to(self.device)
+                        movie_input = torch.tensor([movie_idx], dtype=torch.long).to(self.device)
+                        prediction = self.model(user_input, movie_input)
+                        predictions.append((movie_id, prediction.item()))
+            
+            # Sort predictions and get worst recommendations
+            predictions.sort(key=lambda x: x[1])
+            worst_movies = [movie_id for movie_id, _ in predictions[:n_recommendations]]
+            
+            # Get movie details
+            recommendations = []
+            for movie_id in worst_movies:
+                movie_data = self._get_movie_data(movie_id)
+                if movie_data:
+                    recommendations.append(movie_data)
+            
+            return recommendations
+        except Exception as e:
+            logger.error(f"Error getting worst collaborative recommendations: {str(e)}")
+            return []
 
     def __del__(self):
-        """Cerrar la conexión a la base de datos al destruir el objeto."""
-        if self.movie_data_cache:
-            self.movie_data_cache.clear()
+        """Cleanup when object is destroyed."""
+        if hasattr(self, 'model') and self.model is not None:
+            del self.model
+        torch.cuda.empty_cache()

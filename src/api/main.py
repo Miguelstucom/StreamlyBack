@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, validator
-from typing import List, Dict
+from typing import List, Dict, Optional
 import sys
 from pathlib import Path
 from datetime import timedelta
@@ -14,6 +14,10 @@ import sqlite3
 import numpy as np
 import logging
 import pickle
+import hashlib
+import os
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 
 # Añadir el directorio src al path
 sys.path.append(str(Path(__file__).parent.parent.parent))
@@ -71,6 +75,70 @@ except Exception as e:
 
 # Initialize chatbot
 chatbot = MovieChatbot()
+
+# Configuración de seguridad
+SECRET_KEY = "your-secret-key"  # Cambiar en producción
+ALGORITHM = "HS256"
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Modelo para el registro de usuario
+class UserRegister(BaseModel):
+    username: str
+    firstname: str
+    lastname: str
+    email: str
+    password: str
+    age: int
+    occupation: str
+    preferred_genres: List[int]  # Lista de genre_id
+
+# Función para crear un nuevo usuario
+def create_user(user: UserRegister):
+    conn = sqlite3.connect("data/tmdb_movies.db")
+    cursor = conn.cursor()
+    try:
+        # Verificar si el username o email ya existe
+        cursor.execute("SELECT * FROM users WHERE username = ? OR email = ?", (user.username, user.email))
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail="Username or email already registered")
+        
+        # Obtener el último userId y sumar 1
+        cursor.execute("SELECT MAX(userId) FROM users")
+        last_user_id = cursor.fetchone()[0]
+        next_user_id = (last_user_id or 0) + 1
+        
+        # Insertar usuario con el siguiente userId
+        cursor.execute("""
+        INSERT INTO users (userId, username, firstname, lastname, email, passwordHash, age, occupation)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            next_user_id,
+            user.username,
+            user.firstname,
+            user.lastname,
+            user.email,
+            pwd_context.hash(user.password),
+            user.age,
+            user.occupation
+        ))
+        
+        # Insertar géneros preferidos usando los genre_id proporcionados
+        for genre_id in user.preferred_genres:
+            cursor.execute("INSERT INTO user_genres (user_id, genre_id) VALUES (?, ?)", (next_user_id, genre_id))
+        
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+# Endpoint para registrar un usuario
+@app.post("/register", status_code=status.HTTP_201_CREATED)
+def register_user(user: UserRegister):
+    create_user(user)
+    return {"message": "User registered successfully"}
 
 async def get_tmdb_movie_details(tmdb_id: int) -> Dict:
     """Obtiene detalles de una película desde TMDB."""
@@ -150,34 +218,76 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
 @app.post("/login", response_model=Token)
 async def login(user_data: UserLogin):
     """Endpoint alternativo para login usando email y contraseña."""
-    user = auth_handler.authenticate_user(user_data.email, user_data.password)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Email o contraseña incorrectos",
-            headers={"WWW-Authenticate": "Bearer"},
+    conn = sqlite3.connect("data/tmdb_movies.db")
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM users WHERE email = ?", (user_data.email,))
+        user = cursor.fetchone()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Email o contraseña incorrectos",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        user_dict = {
+            "userId": user[0],
+            "username": user[1],
+            "firstname": user[2],
+            "lastname": user[3],
+            "email": user[4],
+            "passwordHash": user[5],
+            "age": user[6],
+            "occupation": user[7]
+        }
+        if not pwd_context.verify(user_data.password, user_dict["passwordHash"]):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Email o contraseña incorrectos",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = auth_handler.create_access_token(
+            data={"sub": user_dict["email"]}, expires_delta=access_token_expires
         )
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = auth_handler.create_access_token(
-        data={"sub": user["email"]}, expires_delta=access_token_expires
-    )
-    return {"access_token": access_token, "token_type": "bearer"}
+        return {"access_token": access_token, "token_type": "bearer"}
+    finally:
+        conn.close()
 
 @app.get("/me", response_model=UserResponse)
 async def read_users_me(current_user: dict = Depends(get_current_user)):
     """Obtiene información del usuario actual."""
-    user = auth_handler.users_df[auth_handler.users_df['email'] == current_user['email']].iloc[0]
-    preferred_genres = user['preferred_genres'].split('|') if 'preferred_genres' in user else []
-    # Construir el nombre a partir de firstName y lastName
-    first_name = user['firstName'] if 'firstName' in user else ''
-    last_name = user['lastName'] if 'lastName' in user else ''
-    name = f"{first_name} {last_name}".strip()
-    return {
-        "id": int(user['userId']),
-        "email": user['email'],
-        "name": name,
-        "preferred_genres": preferred_genres
-    }
+    conn = sqlite3.connect("data/tmdb_movies.db")
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM users WHERE email = ?", (current_user['email'],))
+        user = cursor.fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        user_dict = {
+            "userId": user[0],
+            "username": user[1],
+            "firstname": user[2],
+            "lastname": user[3],
+            "email": user[4],
+            "age": user[6],
+            "occupation": user[7]
+        }
+        # Obtener géneros preferidos
+        cursor.execute("""
+        SELECT g.name FROM genres g
+        JOIN user_genres ug ON g.id = ug.genre_id
+        WHERE ug.user_id = ?
+        """, (user_dict["userId"],))
+        preferred_genres = [row[0] for row in cursor.fetchall()]
+        name = f"{user_dict['firstname']} {user_dict['lastname']}".strip()
+        return {
+            "id": user_dict["userId"],
+            "email": user_dict["email"],
+            "name": name,
+            "preferred_genres": preferred_genres
+        }
+    finally:
+        conn.close()
 
 @app.get("/")
 async def root():
@@ -239,79 +349,74 @@ async def get_user_recommendations(
             user_id,
             request.n_recommendations
         )
+        print("las mejores")
+        print(recommendations)
         return {"recommendations": recommendations}
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-@app.get("/movies/genre/{genre}")
+@app.get("/api/movies/genre/{genre}")
 async def get_movies_by_genre(
     genre: str,
     current_user: dict = Depends(get_current_user),
-    n_movies: int = 10,
-    min_ratings: int = 50  # Número mínimo de reseñas requeridas
-):
-    """Obtiene las mejores películas de un género específico, excluyendo las que el usuario ya ha visto."""
+    limit: int = 10
+) -> List[Dict]:
+    """Obtiene películas por género, excluyendo las que el usuario ya ha calificado."""
     try:
-        # Obtener el ID del usuario
-        user = auth_handler.users_df[auth_handler.users_df['email'] == current_user['email']].iloc[0]
-        user_id = int(user['userId'])
+        conn = sqlite3.connect('data/tmdb_movies.db')
+        cursor = conn.cursor()
         
-        # Obtener películas del género
-        genre_movies = data['movies'][data['movies']['genres'].str.contains(genre, na=False)]
+        # Get user ID from email
+        cursor.execute('SELECT userId FROM users WHERE email = ?', (current_user['email'],))
+        user_result = cursor.fetchone()
+        if not user_result:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        user_id = user_result[0]
         
-        # Obtener películas que el usuario ya ha visto
-        user_ratings = data['ratings'][data['ratings']['userId'] == user_id]
-        watched_movies = set(user_ratings['movieId'])
+        # Get genre ID first
+        cursor.execute('SELECT id FROM genres WHERE name = ?', (genre,))
+        genre_result = cursor.fetchone()
+        if not genre_result:
+            return []
+        genre_id = genre_result[0]
         
-        # Filtrar películas no vistas
-        unwatched_movies = genre_movies[~genre_movies['movieId'].isin(watched_movies)]
+        # Get movies by genre ID
+        cursor.execute('''
+        SELECT m.*
+        FROM movies m
+        JOIN movie_genres mg ON m.movie_id = mg.movie_id
+        WHERE mg.genre_id = ?
+        ''', (genre_id,))
         
-        # Calcular promedio de calificaciones para cada película
-        movie_ratings = data['ratings'].groupby('movieId').agg({
-            'rating': ['count', 'mean']
-        }).reset_index()
-        movie_ratings.columns = ['movieId', 'rating_count', 'rating_mean']
+        movies = cursor.fetchall()
+        if not movies:
+            return []
+            
+        # Get column names
+        columns = [description[0] for description in cursor.description]
         
-        # Filtrar películas con menos del mínimo de reseñas requeridas
-        movie_ratings = movie_ratings[movie_ratings['rating_count'] >= min_ratings]
+        # Convert to list of dictionaries
+        movies_list = []
+        for movie in movies:
+            movie_dict = dict(zip(columns, movie))
+            
+            # Check if user has rated this movie
+            cursor.execute('SELECT rating FROM ratings WHERE user_id = ? AND movie_id = ?', 
+                         (user_id, movie_dict['movie_id']))
+            user_rating = cursor.fetchone()
+            if user_rating:
+                continue  # Skip movies the user has already rated
+            
+            movies_list.append(movie_dict)
         
-        # Unir con las películas no vistas
-        result = pd.merge(unwatched_movies, movie_ratings, on='movieId')
+        return movies_list[:limit]  # Return limited number of movies
         
-        # Unir con los links para obtener tmdbId
-        result = pd.merge(result, data['links'][['movieId', 'tmdbId']], on='movieId', how='left')
-        
-        # Ordenar por calificación promedio y número de calificaciones
-        result = result.sort_values(['rating_mean', 'rating_count'], ascending=[False, False])
-        
-        # Tomar las n_movies mejores películas
-        top_movies = result.head(n_movies)
-        
-        # Obtener detalles de TMDB para cada película
-        movie_details = []
-        for _, movie in top_movies.iterrows():
-            tmdb_id = int(movie['tmdbId']) if pd.notna(movie['tmdbId']) else None
-            if tmdb_id:
-                details = await get_tmdb_movie_details(tmdb_id)
-                movie_dict = movie.to_dict()
-                movie_dict.update(details)
-                movie_details.append(movie_dict)
-            else:
-                movie_dict = movie.to_dict()
-                movie_dict.update({
-                    "poster_path": None,
-                    "overview": None,
-                    "backdrop_path": None
-                })
-                movie_details.append(movie_dict)
-        
-        return {
-            "genre": genre,
-            "min_ratings": min_ratings,
-            "movies": movie_details
-        }
     except Exception as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        logger.error(f"Error al obtener películas por género: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if 'conn' in locals():
+            conn.close()
 
 @app.get("/movies/user/preferred-genres")
 async def get_movies_by_preferred_genres(
@@ -495,48 +600,38 @@ async def post_movie_review(
 ):
     """Añade una reseña para una película específica."""
     try:
-        # Verify movie exists in database
-        movie_data = recommender._get_movie_data(movie_id)
-        if not movie_data:
+        conn = sqlite3.connect('data/tmdb_movies.db')
+        cursor = conn.cursor()
+        
+        # Verify movie exists
+        cursor.execute('SELECT movie_id FROM movies WHERE movie_id = ?', (movie_id,))
+        if not cursor.fetchone():
             raise HTTPException(status_code=404, detail=f"Película {movie_id} no encontrada")
         
-        # Get user ID from current user
-        user = auth_handler.users_df[auth_handler.users_df['email'] == current_user['email']].iloc[0]
-        user_id = int(user['userId'])
+        # Get user ID from email
+        cursor.execute('SELECT userId FROM users WHERE email = ?', (current_user['email'],))
+        user_result = cursor.fetchone()
+        if not user_result:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        user_id = user_result[0]
         
         # Check if user has already reviewed this movie
-        existing_review = data['ratings'][
-            (data['ratings']['userId'] == user_id) & 
-            (data['ratings']['movieId'] == movie_id)
-        ]
-        
-        if not existing_review.empty:
+        cursor.execute('SELECT rating FROM ratings WHERE user_id = ? AND movie_id = ?', 
+                      (user_id, movie_id))
+        if cursor.fetchone():
             raise HTTPException(
                 status_code=400,
                 detail="Ya has reseñado esta película. Puedes actualizar tu reseña existente."
             )
         
-        # Create new review
-        new_review = {
-            'userId': user_id,
-            'movieId': movie_id,
-            'rating': review.rating,
-            'description': review.description,
-            'timestamp': int(pd.Timestamp.now().timestamp())
-        }
+        # Insert new review
+        timestamp = int(pd.Timestamp.now().timestamp())
+        cursor.execute('''
+        INSERT INTO ratings (user_id, movie_id, rating, description, timestamp)
+        VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, movie_id, review.rating, review.description, timestamp))
         
-        # Add review to DataFrame
-        data['ratings'] = pd.concat([
-            data['ratings'],
-            pd.DataFrame([new_review])
-        ], ignore_index=True)
-        
-        # Save updated ratings to CSV
-        data['ratings'].to_csv("data/ratings.csv", index=False)
-        
-        # Update user-movie matrix
-        if user_id in data['user_movie_matrix'].index and movie_id in data['user_movie_matrix'].columns:
-            data['user_movie_matrix'].loc[user_id, movie_id] = review.rating
+        conn.commit()
         
         return {
             "message": "Reseña añadida exitosamente",
@@ -545,16 +640,17 @@ async def post_movie_review(
                 "movie_id": movie_id,
                 "rating": review.rating,
                 "description": review.description,
-                "timestamp": new_review['timestamp']
+                "timestamp": timestamp
             }
         }
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error al añadir reseña para la película {movie_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Error al añadir reseña")
+    finally:
+        if 'conn' in locals():
+            conn.close()
 
 @app.put("/movies/{movie_id}/review")
 async def update_movie_review(
@@ -605,7 +701,7 @@ async def update_movie_review(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) 
 
 def get_movie_data(movie_id: int) -> Dict:
     """Get complete movie data from SQLite database."""
@@ -723,73 +819,6 @@ async def get_top_movies(limit: int = 10) -> List[Dict]:
         logger.error(f"Error al obtener top películas: {str(e)}")
         raise HTTPException(status_code=500, detail="Error al obtener top películas")
 
-
-@app.get("/api/movies/genre/{genre}")
-async def get_movies_by_genre(
-    genre: str,
-    current_user: dict = Depends(get_current_user),
-    limit: int = 10
-) -> List[Dict]:
-    """Obtiene películas por género, excluyendo las que el usuario ya ha calificado."""
-    try:
-        # Get user ID from current user
-        user = auth_handler.users_df[auth_handler.users_df['email'] == current_user['email']].iloc[0]
-        user_id = int(user['userId'])
-        
-        # Get movies the user has already rated
-        user_ratings = data['ratings'][data['ratings']['userId'] == user_id]
-        rated_movie_ids = set(user_ratings['movieId'])
-        
-        # Get movies of the specified genre
-        conn = sqlite3.connect('data/tmdb_movies.db')
-        cursor = conn.cursor()
-        
-        # Get movies of the genre that the user hasn't rated
-        cursor.execute('''
-        SELECT DISTINCT m.movie_id
-        FROM movies m
-        JOIN movie_genres mg ON m.movie_id = mg.movie_id
-        JOIN genres g ON mg.genre_id = g.id
-        WHERE LOWER(g.name) = LOWER(?)
-        ''', (genre,))
-        
-        movie_ids = [row[0] for row in cursor.fetchall()]
-        conn.close()
-        
-        # Filter out movies the user has already rated
-        unwatched_movie_ids = [mid for mid in movie_ids if mid not in rated_movie_ids]
-        
-        if not unwatched_movie_ids:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No se encontraron películas del género {genre} que no hayas visto"
-            )
-        
-        # Get movie data and calculate average ratings
-        movies_data = []
-        for movie_id in unwatched_movie_ids[:limit]:
-            movie_data = recommender._get_movie_data(movie_id)
-            if movie_data:
-                # Calculate average rating for this movie
-                movie_ratings = data['ratings'][data['ratings']['movieId'] == movie_id]
-                if not movie_ratings.empty:
-                    movie_data['average_rating'] = float(movie_ratings['rating'].mean())
-                    movie_data['rating_count'] = int(len(movie_ratings))
-                else:
-                    movie_data['average_rating'] = 0.0
-                    movie_data['rating_count'] = 0
-                movies_data.append(movie_data)
-        
-        # Sort by average rating
-        movies_data.sort(key=lambda x: x['average_rating'], reverse=True)
-        
-        return movies_data
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error al obtener películas por género: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error al obtener películas por género")
-
 @app.get("/api/movies/{movie_id}")
 async def get_movie(movie_id: int) -> Dict:
     """Obtiene información detallada de una película."""
@@ -849,4 +878,74 @@ async def chat_with_bot(request: ChatRequest, current_user: dict = Depends(get_c
         return {"response": response}
     except Exception as e:
         logger.error(f"Error in chat endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error processing chat request") 
+        raise HTTPException(status_code=500, detail="Error processing chat request")
+
+@app.get("/api/movies/{movie_id}/credits")
+async def get_movie_credits(movie_id: int):
+    """Get cast and crew information for a specific movie."""
+    try:
+        conn = sqlite3.connect('data/tmdb_movies.db')
+        cursor = conn.cursor()
+        
+        # Get movie title for reference
+        cursor.execute("SELECT title FROM movies WHERE movie_id = ?", (movie_id,))
+        movie = cursor.fetchone()
+        if not movie:
+            raise HTTPException(status_code=404, detail="Movie not found")
+        
+        # Get cast (actors)
+        cursor.execute("""
+            SELECT p.id, p.name, p.original_name, p.profile_path, mc.character, mc.cast_order
+            FROM movie_cast mc
+            JOIN people p ON mc.person_id = p.id
+            WHERE mc.movie_id = ?
+            ORDER BY mc.cast_order
+        """, (movie_id,))
+        cast = [
+            {
+                "id": row[0],
+                "name": row[1],
+                "original_name": row[2],
+                "profile_path": row[3],
+                "character": row[4],
+                "order": row[5]
+            }
+            for row in cursor.fetchall()
+        ]
+        
+        # Get crew (directors and producers)
+        cursor.execute("""
+            SELECT p.id, p.name, p.original_name, p.profile_path, mc.job
+            FROM movie_crew mc
+            JOIN people p ON mc.person_id = p.id
+            WHERE mc.movie_id = ? AND mc.job IN ('Director', 'Producer')
+            ORDER BY mc.job
+        """, (movie_id,))
+        crew = [
+            {
+                "id": row[0],
+                "name": row[1],
+                "original_name": row[2],
+                "profile_path": row[3],
+                "job": row[4]
+            }
+            for row in cursor.fetchall()
+        ]
+        
+        # Organize crew by job
+        directors = [person for person in crew if person['job'] == 'Director']
+        producers = [person for person in crew if person['job'] == 'Producer']
+        
+        return {
+            "movie_id": movie_id,
+            "title": movie[0],
+            "cast": cast,
+            "directors": directors,
+            "producers": producers
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting movie credits: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error retrieving movie credits")
+    finally:
+        conn.close() 
