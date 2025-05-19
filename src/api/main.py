@@ -202,18 +202,60 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
 @app.post("/token", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
     """Endpoint para obtener token de acceso."""
-    user = auth_handler.authenticate_user(form_data.username, form_data.password)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Email o contraseña incorrectos",
-            headers={"WWW-Authenticate": "Bearer"},
+    try:
+        conn = sqlite3.connect('data/tmdb_movies.db')
+        cursor = conn.cursor()
+        
+        # Buscar usuario por email
+        cursor.execute('SELECT * FROM users WHERE email = ?', (form_data.username,))
+        user = cursor.fetchone()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Email o contraseña incorrectos",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            
+        # Convertir resultado a diccionario
+        user_dict = {
+            "userId": user[0],
+            "username": user[1],
+            "firstname": user[2],
+            "lastname": user[3],
+            "email": user[4],
+            "passwordHash": user[5],
+            "age": user[6],
+            "occupation": user[7]
+        }
+        
+        # Verificar contraseña
+        if not pwd_context.verify(form_data.password, user_dict["passwordHash"]):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Email o contraseña incorrectos",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            
+        # Crear token de acceso
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = auth_handler.create_access_token(
+            data={"sub": user_dict["email"]}, expires_delta=access_token_expires
         )
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = auth_handler.create_access_token(
-        data={"sub": user["email"]}, expires_delta=access_token_expires
-    )
-    return {"access_token": access_token, "token_type": "bearer"}
+        
+        return {"access_token": access_token, "token_type": "bearer"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error en login: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error interno del servidor"
+        )
+    finally:
+        if 'conn' in locals():
+            conn.close()
 
 @app.post("/login", response_model=Token)
 async def login(user_data: UserLogin):
@@ -256,13 +298,16 @@ async def login(user_data: UserLogin):
 @app.get("/me", response_model=UserResponse)
 async def read_users_me(current_user: dict = Depends(get_current_user)):
     """Obtiene información del usuario actual."""
-    conn = sqlite3.connect("data/tmdb_movies.db")
-    cursor = conn.cursor()
     try:
+        conn = sqlite3.connect("data/tmdb_movies.db")
+        cursor = conn.cursor()
+        
+        # Obtener información del usuario directamente de la base de datos
         cursor.execute("SELECT * FROM users WHERE email = ?", (current_user['email'],))
         user = cursor.fetchone()
         if not user:
             raise HTTPException(status_code=404, detail="Usuario no encontrado")
+            
         user_dict = {
             "userId": user[0],
             "username": user[1],
@@ -272,6 +317,7 @@ async def read_users_me(current_user: dict = Depends(get_current_user)):
             "age": user[6],
             "occupation": user[7]
         }
+        
         # Obtener géneros preferidos
         cursor.execute("""
         SELECT g.name FROM genres g
@@ -279,6 +325,7 @@ async def read_users_me(current_user: dict = Depends(get_current_user)):
         WHERE ug.user_id = ?
         """, (user_dict["userId"],))
         preferred_genres = [row[0] for row in cursor.fetchall()]
+        
         name = f"{user_dict['firstname']} {user_dict['lastname']}".strip()
         return {
             "id": user_dict["userId"],
@@ -286,8 +333,12 @@ async def read_users_me(current_user: dict = Depends(get_current_user)):
             "name": name,
             "preferred_genres": preferred_genres
         }
+    except Exception as e:
+        logger.error(f"Error al obtener información del usuario: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error al obtener información del usuario")
     finally:
-        conn.close()
+        if 'conn' in locals():
+            conn.close()
 
 @app.get("/")
 async def root():
@@ -600,6 +651,11 @@ async def post_movie_review(
 ):
     """Añade una reseña para una película específica."""
     try:
+        # Print token and user information
+        print("Token information:", current_user)
+        print("Movie ID:", movie_id)
+        print("Review data:", review.dict())
+        
         conn = sqlite3.connect('data/tmdb_movies.db')
         cursor = conn.cursor()
         
@@ -614,6 +670,7 @@ async def post_movie_review(
         if not user_result:
             raise HTTPException(status_code=404, detail="Usuario no encontrado")
         user_id = user_result[0]
+        print("User ID found:", user_id)
         
         # Check if user has already reviewed this movie
         cursor.execute('SELECT rating FROM ratings WHERE user_id = ? AND movie_id = ?', 
@@ -632,6 +689,7 @@ async def post_movie_review(
         ''', (user_id, movie_id, review.rating, review.description, timestamp))
         
         conn.commit()
+        print("Review successfully inserted into database")
         
         return {
             "message": "Reseña añadida exitosamente",
@@ -647,6 +705,7 @@ async def post_movie_review(
         raise
     except Exception as e:
         logger.error(f"Error al añadir reseña para la película {movie_id}: {str(e)}")
+        print("Error details:", str(e))
         raise HTTPException(status_code=500, detail="Error al añadir reseña")
     finally:
         if 'conn' in locals():
@@ -948,4 +1007,60 @@ async def get_movie_credits(movie_id: int):
         logger.error(f"Error getting movie credits: {str(e)}")
         raise HTTPException(status_code=500, detail="Error retrieving movie credits")
     finally:
-        conn.close() 
+        conn.close()
+
+class UserFilmRequest(BaseModel):
+    user_id: int
+    movie_id: int
+
+@app.post("/user/film")
+async def add_user_film(
+    request: UserFilmRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Registra una película vista por un usuario."""
+    try:
+        conn = sqlite3.connect('data/tmdb_movies.db')
+        cursor = conn.cursor()
+        
+        # Verificar que el usuario existe y coincide con el usuario actual
+        cursor.execute('SELECT userId FROM users WHERE email = ?', (current_user['email'],))
+        user_result = cursor.fetchone()
+        if not user_result or user_result[0] != request.user_id:
+            raise HTTPException(
+                status_code=403,
+                detail="No tienes permiso para registrar películas para este usuario"
+            )
+        
+        # Verificar que la película existe
+        cursor.execute('SELECT movie_id FROM movies WHERE movie_id = ?', (request.movie_id,))
+        if not cursor.fetchone():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Película {request.movie_id} no encontrada"
+            )
+        
+        # Insertar el registro
+        cursor.execute('''
+        INSERT INTO user_film (user_id, movie_id)
+        VALUES (?, ?)
+        ''', (request.user_id, request.movie_id))
+        conn.commit()
+        
+        return {
+            "message": "Película registrada exitosamente",
+            "user_id": request.user_id,
+            "movie_id": request.movie_id
+        }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al registrar película vista: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error al registrar película vista"
+        )
+    finally:
+        if 'conn' in locals():
+            conn.close() 
