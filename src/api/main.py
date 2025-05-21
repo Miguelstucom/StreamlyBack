@@ -28,6 +28,8 @@ from src.auth.auth_handler import AuthHandler, ACCESS_TOKEN_EXPIRE_MINUTES
 from src.auth.models import Token, UserLogin, UserResponse
 from src.utils.generate_ratings_descriptions import generate_rating_description
 from src.utils.chatbot import MovieChatbot
+from src.utils.svd_recommender import SVDRecommender
+from src.utils.genre_recommender import GenreRecommender
 
 logger = logging.getLogger(__name__)
 
@@ -410,9 +412,10 @@ async def get_user_recommendations(
 async def get_movies_by_genre(
     genre: str,
     current_user: dict = Depends(get_current_user),
-    limit: int = 10
+    limit: int = 10,
+    min_votes: int = 50  # Mínimo de votos requeridos
 ) -> List[Dict]:
-    """Obtiene películas por género, excluyendo las que el usuario ya ha calificado."""
+    """Obtiene películas por género ordenadas por calificación ponderada tipo IMDb."""
     try:
         conn = sqlite3.connect('data/tmdb_movies.db')
         cursor = conn.cursor()
@@ -431,13 +434,29 @@ async def get_movies_by_genre(
             return []
         genre_id = genre_result[0]
         
-        # Get movies by genre ID
+        # Calcular promedio global (C)
+        cursor.execute('SELECT AVG(rating) FROM ratings')
+        C = cursor.fetchone()[0]  # Promedio global de calificaciones
+        
+        # Obtener películas del género con sus calificaciones
         cursor.execute('''
-        SELECT m.*
-        FROM movies m
-        JOIN movie_genres mg ON m.movie_id = mg.movie_id
-        WHERE mg.genre_id = ?
-        ''', (genre_id,))
+        WITH MovieRatings AS (
+            SELECT 
+                m.*,
+                COUNT(r.rating) as num_ratings,
+                AVG(r.rating) as avg_rating
+            FROM movies m
+            JOIN movie_genres mg ON m.movie_id = mg.movie_id
+            LEFT JOIN ratings r ON m.movie_id = r.movie_id
+            WHERE mg.genre_id = ?
+            GROUP BY m.movie_id
+        )
+        SELECT *
+        FROM MovieRatings
+        WHERE num_ratings >= ?
+        ORDER BY (num_ratings * avg_rating + ? * ?) / (num_ratings + ?) DESC
+        LIMIT ?
+        ''', (genre_id, min_votes, min_votes, C, min_votes, limit))
         
         movies = cursor.fetchall()
         if not movies:
@@ -1060,6 +1079,88 @@ async def add_user_film(
         raise HTTPException(
             status_code=500,
             detail="Error al registrar película vista"
+        )
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+# Inicializar el recomendador SVD
+svd_recommender = SVDRecommender()
+
+@app.get("/recommendations/svd/{user_id}")
+async def get_svd_recommendations(
+    user_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """Obtiene recomendaciones de películas basadas en SVD para un usuario."""
+    try:
+        # Verificar que el usuario existe y coincide con el usuario actual
+        conn = sqlite3.connect('data/tmdb_movies.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT userId FROM users WHERE email = ?', (current_user['email'],))
+        user_result = cursor.fetchone()
+        if not user_result or user_result[0] != user_id:
+            raise HTTPException(
+                status_code=403,
+                detail="No tienes permiso para obtener recomendaciones para este usuario"
+            )
+        
+        # Obtener recomendaciones
+        recommendations = svd_recommender.get_recommendations(user_id)
+        
+        return {
+            "user_id": user_id,
+            "recommendations": recommendations
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al obtener recomendaciones SVD: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error al obtener recomendaciones"
+        )
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+# Inicializar el recomendador de géneros
+genre_recommender = GenreRecommender()
+
+@app.get("/recommendations/genres/{user_id}")
+async def get_genre_recommendations(
+    user_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """Obtiene recomendaciones de géneros para un usuario."""
+    try:
+        # Verificar que el usuario existe y coincide con el usuario actual
+        conn = sqlite3.connect('data/tmdb_movies.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT userId FROM users WHERE email = ?', (current_user['email'],))
+        user_result = cursor.fetchone()
+        if not user_result or user_result[0] != user_id:
+            raise HTTPException(
+                status_code=403,
+                detail="No tienes permiso para obtener recomendaciones para este usuario"
+            )
+        
+        # Obtener recomendaciones
+        recommendations = genre_recommender.get_recommendations(user_id)
+        
+        return {
+            "user_id": user_id,
+            "recommended_genres": recommendations
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al obtener recomendaciones de géneros: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error al obtener recomendaciones de géneros"
         )
     finally:
         if 'conn' in locals():

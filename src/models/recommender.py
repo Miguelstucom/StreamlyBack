@@ -13,13 +13,14 @@ import sqlite3
 
 logger = logging.getLogger(__name__)
 
+
 class MovieDataset(Dataset):
     def __init__(self, user_movie_matrix):
         self.user_movie_matrix = user_movie_matrix
         self.users = []
         self.movies = []
         self.ratings = []
-        
+
         # Convert sparse matrix to list of (user, movie, rating) tuples
         for user_idx in range(user_movie_matrix.shape[0]):
             for movie_idx in range(user_movie_matrix.shape[1]):
@@ -28,10 +29,10 @@ class MovieDataset(Dataset):
                     self.users.append(user_idx)
                     self.movies.append(movie_idx)
                     self.ratings.append(rating)
-    
+
     def __len__(self):
         return len(self.ratings)
-    
+
     def __getitem__(self, idx):
         return {
             'user': torch.tensor(self.users[idx], dtype=torch.long),
@@ -39,12 +40,13 @@ class MovieDataset(Dataset):
             'rating': torch.tensor(self.ratings[idx], dtype=torch.float)
         }
 
+
 class NeuralCF(nn.Module):
     def __init__(self, num_users, num_movies, embedding_dim=50, layers=[100, 50, 20]):
         super(NeuralCF, self).__init__()
         self.user_embedding = nn.Embedding(num_users, embedding_dim)
         self.movie_embedding = nn.Embedding(num_movies, embedding_dim)
-        
+
         # Build MLP layers
         self.layers = nn.ModuleList()
         input_dim = embedding_dim * 2
@@ -54,28 +56,30 @@ class NeuralCF(nn.Module):
             self.layers.append(nn.BatchNorm1d(layer_size))
             self.layers.append(nn.Dropout(0.2))
             input_dim = layer_size
-        
+
         self.output_layer = nn.Linear(layers[-1], 1)
-        
+
     def forward(self, user_input, movie_input):
         user_embedded = self.user_embedding(user_input)
         movie_embedded = self.movie_embedding(movie_input)
-        
+
         # Concatenate embeddings
         x = torch.cat([user_embedded, movie_embedded], dim=1)
-        
+
         # Pass through MLP layers
         for layer in self.layers:
             x = layer(x)
-        
+
         # Output layer
         output = self.output_layer(x)
         return output.squeeze()
+
 
 def precision_at_k(y_true, y_pred, k=10):
     """Calcula la precisión@k."""
     top_k_idx = np.argsort(y_pred)[-k:]
     return np.mean(y_true[top_k_idx] >= 4)
+
 
 class MovieRecommenderDL:
     def __init__(self, embedding_dim: int = 50):
@@ -105,20 +109,20 @@ class MovieRecommenderDL:
         conn = sqlite3.connect('data/tmdb_movies.db')
         try:
             cursor = conn.cursor()
-            
+
             # Get basic movie info
             cursor.execute('''
             SELECT * FROM movies WHERE movie_id = ?
             ''', (movie_id,))
             movie = cursor.fetchone()
-            
+
             if not movie:
                 return None
-                
+
             # Get column names
             columns = [description[0] for description in cursor.description]
             movie_dict = dict(zip(columns, movie))
-            
+
             # Get genres
             cursor.execute('''
             SELECT g.name 
@@ -127,7 +131,7 @@ class MovieRecommenderDL:
             WHERE mg.movie_id = ?
             ''', (movie_id,))
             movie_dict['genres'] = [row[0] for row in cursor.fetchall()]
-            
+
             # Get production companies
             cursor.execute('''
             SELECT pc.name 
@@ -136,7 +140,7 @@ class MovieRecommenderDL:
             WHERE mpc.movie_id = ?
             ''', (movie_id,))
             movie_dict['production_companies'] = [row[0] for row in cursor.fetchall()]
-            
+
             # Get production countries
             cursor.execute('''
             SELECT pc.name 
@@ -145,7 +149,7 @@ class MovieRecommenderDL:
             WHERE mpc.movie_id = ?
             ''', (movie_id,))
             movie_dict['production_countries'] = [row[0] for row in cursor.fetchall()]
-            
+
             # Get spoken languages
             cursor.execute('''
             SELECT sl.name 
@@ -154,7 +158,7 @@ class MovieRecommenderDL:
             WHERE msl.movie_id = ?
             ''', (movie_id,))
             movie_dict['spoken_languages'] = [row[0] for row in cursor.fetchall()]
-            
+
             # Get collection info if exists
             cursor.execute('''
             SELECT c.name, c.poster_path, c.backdrop_path
@@ -169,7 +173,7 @@ class MovieRecommenderDL:
                     'poster_path': collection[1],
                     'backdrop_path': collection[2]
                 }
-            
+
             # Cache the result
             self.movie_data_cache[movie_id] = movie_dict
             return movie_dict
@@ -179,29 +183,29 @@ class MovieRecommenderDL:
     def fit(self, data: Dict):
         """Entrena ambos modelos de recomendación."""
         logger.info("Iniciando entrenamiento de modelos...")
-        
+
         # Get movies data from database
         conn = sqlite3.connect('data/tmdb_movies.db')
         try:
             cursor = conn.cursor()
             cursor.execute('SELECT movie_id, title, overview FROM movies')
             movies_data = cursor.fetchall()
-            
+
             # Create movies DataFrame
             self.movies_df = pd.DataFrame(movies_data, columns=['movieId', 'title', 'overview'])
-            
+
             # Get user and rating data from database
             cursor.execute('SELECT user_id, movie_id, rating FROM ratings')
             ratings_data = cursor.fetchall()
             ratings_df = pd.DataFrame(ratings_data, columns=['userId', 'movieId', 'rating'])
-            
+
             # Create user-movie matrix
             self.user_movie_matrix = ratings_df.pivot(
                 index='userId',
                 columns='movieId',
                 values='rating'
             ).fillna(0)
-            
+
             # Create user and movie mappings
             self.user_to_idx = {user: idx for idx, user in enumerate(self.user_movie_matrix.index)}
             self.movie_to_idx = {movie: idx for idx, movie in enumerate(self.user_movie_matrix.columns)}
@@ -210,44 +214,44 @@ class MovieRecommenderDL:
 
         # Entrenar modelo basado en contenido
         self._fit_content_based()
-        
+
         # Entrenar modelo colaborativo
         self._fit_collaborative()
-        
+
         logger.info("Entrenamiento completado exitosamente")
 
     def _fit_content_based(self):
         """Entrena el modelo basado en contenido."""
         logger.info("Entrenando modelo basado en contenido...")
-        
+
         # Combine title and overview for content-based features
         self.movies_df['content'] = self.movies_df['title'] + ' ' + self.movies_df['overview'].fillna('')
-        
+
         # Create TF-IDF matrix
         self.movie_features = self.vectorizer.fit_transform(self.movies_df['content'])
-        
+
         # Calculate similarity matrix
         self.movie_similarity = cosine_similarity(self.movie_features)
-        
+
         logger.info("Modelo basado en contenido entrenado exitosamente")
 
     def _fit_collaborative(self):
         """Entrena el modelo colaborativo."""
         logger.info("Entrenando modelo colaborativo...")
-        
+
         # Create dataset
         dataset = MovieDataset(self.user_movie_matrix)
         dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
-        
+
         # Initialize model
         num_users = len(self.user_to_idx)
         num_movies = len(self.movie_to_idx)
         self.model = NeuralCF(num_users, num_movies, self.embedding_dim).to(self.device)
-        
+
         # Training setup
         criterion = nn.MSELoss()
         optimizer = optim.Adam(self.model.parameters(), lr=0.001)
-        
+
         # Training loop
         self.model.train()
         for epoch in range(10):
@@ -256,17 +260,17 @@ class MovieRecommenderDL:
                 user_input = batch['user'].to(self.device)
                 movie_input = batch['movie'].to(self.device)
                 rating = batch['rating'].to(self.device)
-                
+
                 optimizer.zero_grad()
                 output = self.model(user_input, movie_input)
                 loss = criterion(output, rating)
                 loss.backward()
                 optimizer.step()
-                
+
                 total_loss += loss.item()
-            
-            logger.info(f"Epoch {epoch+1}, Loss: {total_loss/len(dataloader):.4f}")
-        
+
+            logger.info(f"Epoch {epoch + 1}, Loss: {total_loss / len(dataloader):.4f}")
+
         logger.info("Modelo colaborativo entrenado exitosamente")
 
     def get_content_based_recommendations(self, movie_id: int, n_recommendations: int = 5) -> List[Dict]:
@@ -274,21 +278,21 @@ class MovieRecommenderDL:
         try:
             # Get movie index
             movie_idx = self.movies_df[self.movies_df['movieId'] == movie_id].index[0]
-            
+
             # Get similarity scores
             similarity_scores = self.movie_similarity[movie_idx]
-            
+
             # Get top similar movies
-            similar_indices = similarity_scores.argsort()[::-1][1:n_recommendations+1]
+            similar_indices = similarity_scores.argsort()[::-1][1:n_recommendations + 1]
             similar_movies = self.movies_df.iloc[similar_indices]
-            
+
             # Get movie details
             recommendations = []
             for _, movie in similar_movies.iterrows():
                 movie_data = self._get_movie_data(movie['movieId'])
                 if movie_data:
                     recommendations.append(movie_data)
-            
+
             return recommendations
         except Exception as e:
             logger.error(f"Error getting content-based recommendations: {str(e)}")
@@ -301,13 +305,13 @@ class MovieRecommenderDL:
             user_idx = self.user_to_idx.get(user_id)
             if user_idx is None:
                 return []
-            
+
             # Get user ratings
             user_ratings = self.user_movie_matrix.iloc[user_idx]
-            
+
             # Get unrated movies
             unrated_movies = user_ratings[user_ratings == 0].index
-            
+
             # Predict ratings for unrated movies
             predictions = []
             self.model.eval()
@@ -319,18 +323,18 @@ class MovieRecommenderDL:
                         movie_input = torch.tensor([movie_idx], dtype=torch.long).to(self.device)
                         prediction = self.model(user_input, movie_input)
                         predictions.append((movie_id, prediction.item()))
-            
+
             # Sort predictions and get top recommendations
             predictions.sort(key=lambda x: x[1], reverse=True)
             top_movies = [movie_id for movie_id, _ in predictions[:n_recommendations]]
-            
+
             # Get movie details
             recommendations = []
             for movie_id in top_movies:
                 movie_data = self._get_movie_data(movie_id)
                 if movie_data:
                     recommendations.append(movie_data)
-            
+
             return recommendations
         except Exception as e:
             logger.error(f"Error getting collaborative recommendations: {str(e)}")
@@ -343,13 +347,13 @@ class MovieRecommenderDL:
             user_idx = self.user_to_idx.get(user_id)
             if user_idx is None:
                 return []
-            
+
             # Get user ratings
             user_ratings = self.user_movie_matrix.iloc[user_idx]
-            
+
             # Get unrated movies
             unrated_movies = user_ratings[user_ratings == 0].index
-            
+
             # Predict ratings for unrated movies
             predictions = []
             self.model.eval()
@@ -361,18 +365,18 @@ class MovieRecommenderDL:
                         movie_input = torch.tensor([movie_idx], dtype=torch.long).to(self.device)
                         prediction = self.model(user_input, movie_input)
                         predictions.append((movie_id, prediction.item()))
-            
+
             # Sort predictions and get worst recommendations
             predictions.sort(key=lambda x: x[1])
             worst_movies = [movie_id for movie_id, _ in predictions[:n_recommendations]]
-            
+
             # Get movie details
             recommendations = []
             for movie_id in worst_movies:
                 movie_data = self._get_movie_data(movie_id)
                 if movie_data:
                     recommendations.append(movie_data)
-            
+
             return recommendations
         except Exception as e:
             logger.error(f"Error getting worst collaborative recommendations: {str(e)}")
