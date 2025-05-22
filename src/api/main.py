@@ -438,7 +438,7 @@ async def get_movies_by_genre(
         cursor.execute('SELECT AVG(rating) FROM ratings')
         C = cursor.fetchone()[0]  # Promedio global de calificaciones
         
-        # Obtener películas del género con sus calificaciones
+        # Obtener películas del género con sus calificaciones, excluyendo las ya vistas
         cursor.execute('''
         WITH MovieRatings AS (
             SELECT 
@@ -449,6 +449,11 @@ async def get_movies_by_genre(
             JOIN movie_genres mg ON m.movie_id = mg.movie_id
             LEFT JOIN ratings r ON m.movie_id = r.movie_id
             WHERE mg.genre_id = ?
+            AND m.movie_id NOT IN (
+                SELECT movie_id 
+                FROM user_film 
+                WHERE user_id = ?
+            )
             GROUP BY m.movie_id
         )
         SELECT *
@@ -456,7 +461,7 @@ async def get_movies_by_genre(
         WHERE num_ratings >= ?
         ORDER BY (num_ratings * avg_rating + ? * ?) / (num_ratings + ?) DESC
         LIMIT ?
-        ''', (genre_id, min_votes, min_votes, C, min_votes, limit))
+        ''', (genre_id, user_id, min_votes, min_votes, C, min_votes, limit))
         
         movies = cursor.fetchall()
         if not movies:
@@ -690,6 +695,20 @@ async def post_movie_review(
             raise HTTPException(status_code=404, detail="Usuario no encontrado")
         user_id = user_result[0]
         print("User ID found:", user_id)
+        
+        # Verificar que el usuario ha visto la película
+        cursor.execute('''
+        SELECT COUNT(*) 
+        FROM user_film 
+        WHERE user_id = ? AND movie_id = ?
+        ''', (user_id, movie_id))
+        has_watched = cursor.fetchone()[0] > 0
+        
+        if not has_watched:
+            raise HTTPException(
+                status_code=403,
+                detail="No puedes reseñar una película que no has visto. Primero debes marcar la película como vista."
+            )
         
         # Check if user has already reviewed this movie
         cursor.execute('SELECT rating FROM ratings WHERE user_id = ? AND movie_id = ?', 
@@ -1162,6 +1181,97 @@ async def get_genre_recommendations(
             status_code=500,
             detail="Error al obtener recomendaciones de géneros"
         )
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+@app.get("/api/user/watch-history")
+async def get_user_watch_history(
+    current_user: dict = Depends(get_current_user),
+    limit: int = 20,
+    offset: int = 0
+) -> Dict:
+    """Obtiene el historial de películas vistas del usuario."""
+    try:
+        conn = sqlite3.connect('data/tmdb_movies.db')
+        cursor = conn.cursor()
+        
+        # Get user ID from email
+        cursor.execute('SELECT userId FROM users WHERE email = ?', (current_user['email'],))
+        user_result = cursor.fetchone()
+        if not user_result:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        user_id = user_result[0]
+        
+        # Obtener el total de películas vistas
+        cursor.execute('''
+        SELECT COUNT(DISTINCT movie_id) 
+        FROM user_film 
+        WHERE user_id = ?
+        ''', (user_id,))
+        total_movies = cursor.fetchone()[0]
+        
+        # Obtener películas vistas con detalles, ordenadas por rowid descendente
+        cursor.execute('''
+        WITH LatestViews AS (
+            SELECT movie_id, MAX(rowid) as last_view
+            FROM user_film
+            WHERE user_id = ?
+            GROUP BY movie_id
+        )
+        SELECT 
+            m.*,
+            GROUP_CONCAT(g.name) as genres,
+            r.rating,
+            r.description as review
+        FROM LatestViews lv
+        JOIN movies m ON lv.movie_id = m.movie_id
+        LEFT JOIN movie_genres mg ON m.movie_id = mg.movie_id
+        LEFT JOIN genres g ON mg.genre_id = g.id
+        LEFT JOIN ratings r ON m.movie_id = r.movie_id AND r.user_id = ?
+        GROUP BY m.movie_id
+        ORDER BY lv.last_view DESC
+        LIMIT ? OFFSET ?
+        ''', (user_id, user_id, limit, offset))
+        
+        movies = cursor.fetchall()
+        if not movies:
+            return {
+                "total_movies": 0,
+                "current_page": offset // limit + 1,
+                "total_pages": 0,
+                "movies": []
+            }
+            
+        # Get column names
+        columns = [description[0] for description in cursor.description]
+        
+        # Convert to list of dictionaries
+        movies_list = []
+        for movie in movies:
+            movie_dict = dict(zip(columns, movie))
+            
+            # Convertir géneros de string a lista
+            if movie_dict['genres']:
+                movie_dict['genres'] = movie_dict['genres'].split(',')
+            else:
+                movie_dict['genres'] = []
+            
+            movies_list.append(movie_dict)
+        
+        # Calcular total de páginas
+        total_pages = (total_movies + limit - 1) // limit
+        
+        return {
+            "total_movies": total_movies,
+            "current_page": offset // limit + 1,
+            "total_pages": total_pages,
+            "movies": movies_list
+        }
+        
+    except Exception as e:
+        logger.error(f"Error al obtener historial de películas: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         if 'conn' in locals():
             conn.close() 

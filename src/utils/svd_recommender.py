@@ -109,38 +109,51 @@ class SVDRecommender:
         try:
             if self.model is None:
                 self.load_model()
-            
+
+            # Obtener películas que el usuario ya ha visto
             conn = sqlite3.connect('data/tmdb_movies.db')
             cursor = conn.cursor()
             
-            # Obtener todas las películas
-            cursor.execute('SELECT movie_id FROM movies')
-            all_movies = [row[0] for row in cursor.fetchall()]
-            
-            # Obtener películas ya vistas por el usuario
+            # Obtener películas vistas
             cursor.execute('''
-            SELECT DISTINCT movie_id 
-            FROM user_film 
-            WHERE user_id = ?
+            SELECT movie_id FROM user_film WHERE user_id = ?
             ''', (user_id,))
-            seen_movies = {row[0] for row in cursor.fetchall()}
+            watched_movies = {row[0] for row in cursor.fetchall()}
             
-            # Predecir ratings para películas no vistas
+            # Obtener películas calificadas
+            cursor.execute('''
+            SELECT movie_id FROM ratings WHERE user_id = ?
+            ''', (user_id,))
+            rated_movies = {row[0] for row in cursor.fetchall()}
+            
+            # Combinar películas vistas y calificadas
+            excluded_movies = watched_movies.union(rated_movies)
+            
+            # Obtener todas las películas disponibles
+            cursor.execute('SELECT movie_id FROM movies')
+            all_movies = {row[0] for row in cursor.fetchall()}
+            
+            # Filtrar películas no vistas/no calificadas
+            available_movies = list(all_movies - excluded_movies)
+            
+            if not available_movies:
+                return []
+
+            # Predecir calificaciones para todas las películas disponibles
             predictions = []
-            for movie_id in all_movies:
-                if movie_id not in seen_movies:
-                    pred = self.model.predict(user_id, movie_id)
-                    predictions.append((movie_id, pred.est))
-            
-            # Ordenar por rating predicho
+            for movie_id in available_movies:
+                pred = self.model.predict(user_id, movie_id)
+                predictions.append((movie_id, pred.est))
+
+            # Ordenar predicciones y obtener las mejores
             predictions.sort(key=lambda x: x[1], reverse=True)
-            
-            # Obtener detalles de las películas recomendadas
-            recommended_movies = []
-            for movie_id, _ in predictions[:n_recommendations]:
+            top_movies = [movie_id for movie_id, _ in predictions[:n_recommendations]]
+
+            # Obtener detalles de las películas
+            recommendations = []
+            for movie_id in top_movies:
                 cursor.execute('''
-                SELECT m.*, 
-                       GROUP_CONCAT(DISTINCT g.name) as genres
+                SELECT m.*, GROUP_CONCAT(g.name) as genres
                 FROM movies m
                 LEFT JOIN movie_genres mg ON m.movie_id = mg.movie_id
                 LEFT JOIN genres g ON mg.genre_id = g.id
@@ -150,14 +163,22 @@ class SVDRecommender:
                 
                 movie = cursor.fetchone()
                 if movie:
-                    movie_dict = dict(zip([col[0] for col in cursor.description], movie))
-                    movie_dict['genres'] = movie_dict['genres'].split(',') if movie_dict['genres'] else []
-                    recommended_movies.append(movie_dict)
-            
-            return recommended_movies
-            
+                    # Obtener nombres de columnas
+                    columns = [description[0] for description in cursor.description]
+                    movie_dict = dict(zip(columns, movie))
+                    
+                    # Convertir géneros de string a lista
+                    if movie_dict['genres']:
+                        movie_dict['genres'] = movie_dict['genres'].split(',')
+                    else:
+                        movie_dict['genres'] = []
+                        
+                    recommendations.append(movie_dict)
+
+            return recommendations
+
         except Exception as e:
-            logger.error(f"Error al obtener recomendaciones: {str(e)}")
+            logger.error(f"Error al obtener recomendaciones SVD: {str(e)}")
             raise
         finally:
             if 'conn' in locals():

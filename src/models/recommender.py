@@ -301,86 +301,128 @@ class MovieRecommenderDL:
     def get_collaborative_recommendations(self, user_id: int, n_recommendations: int = 5) -> List[Dict]:
         """Obtiene recomendaciones colaborativas para un usuario."""
         try:
-            # Get user index
+            # Obtener el índice del usuario
             user_idx = self.user_to_idx.get(user_id)
             if user_idx is None:
-                return []
+                raise ValueError(f"Usuario {user_id} no encontrado")
 
-            # Get user ratings
-            user_ratings = self.user_movie_matrix.iloc[user_idx]
-
-            # Get unrated movies
-            unrated_movies = user_ratings[user_ratings == 0].index
-
-            # Predict ratings for unrated movies
+            # Obtener películas que el usuario ya ha visto
+            conn = sqlite3.connect('data/tmdb_movies.db')
+            cursor = conn.cursor()
+            
+            # Obtener películas vistas
+            cursor.execute('''
+            SELECT movie_id FROM user_film WHERE user_id = ?
+            ''', (user_id,))
+            watched_movies = {row[0] for row in cursor.fetchall()}
+            
+            # Obtener películas calificadas
+            cursor.execute('''
+            SELECT movie_id FROM ratings WHERE user_id = ?
+            ''', (user_id,))
+            rated_movies = {row[0] for row in cursor.fetchall()}
+            
+            # Combinar películas vistas y calificadas
+            excluded_movies = watched_movies.union(rated_movies)
+            
+            # Obtener todas las películas no vistas/no calificadas
+            all_movies = set(self.movie_to_idx.keys())
+            available_movies = all_movies - excluded_movies
+            
+            # Predecir calificaciones para películas disponibles
             predictions = []
             self.model.eval()
             with torch.no_grad():
-                for movie_id in unrated_movies:
+                for movie_id in available_movies:
                     movie_idx = self.movie_to_idx.get(movie_id)
                     if movie_idx is not None:
                         user_input = torch.tensor([user_idx], dtype=torch.long).to(self.device)
                         movie_input = torch.tensor([movie_idx], dtype=torch.long).to(self.device)
                         prediction = self.model(user_input, movie_input)
                         predictions.append((movie_id, prediction.item()))
-
-            # Sort predictions and get top recommendations
-            predictions.sort(key=lambda x: x[1], reverse=True)
+            
+            # Ordenar predicciones y obtener las mejores
+            predictions.sort(key=lambda x: x[1], reverse=True)  # Ordenar por calificación (descendente)
             top_movies = [movie_id for movie_id, _ in predictions[:n_recommendations]]
-
-            # Get movie details
+            
+            # Obtener detalles de las películas
             recommendations = []
             for movie_id in top_movies:
                 movie_data = self._get_movie_data(movie_id)
                 if movie_data:
                     recommendations.append(movie_data)
-
+            
             return recommendations
+            
         except Exception as e:
-            logger.error(f"Error getting collaborative recommendations: {str(e)}")
-            return []
+            logger.error(f"Error al obtener recomendaciones colaborativas: {str(e)}")
+            raise
+        finally:
+            if 'conn' in locals():
+                conn.close()
 
     def get_worst_collaborative_recommendations(self, user_id: int, n_recommendations: int = 5) -> List[Dict]:
         """Obtiene las peores recomendaciones colaborativas para un usuario."""
         try:
-            # Get user index
+            # Obtener el índice del usuario
             user_idx = self.user_to_idx.get(user_id)
             if user_idx is None:
-                return []
+                raise ValueError(f"Usuario {user_id} no encontrado")
 
-            # Get user ratings
-            user_ratings = self.user_movie_matrix.iloc[user_idx]
-
-            # Get unrated movies
-            unrated_movies = user_ratings[user_ratings == 0].index
-
-            # Predict ratings for unrated movies
+            # Obtener películas que el usuario ya ha visto
+            conn = sqlite3.connect('data/tmdb_movies.db')
+            cursor = conn.cursor()
+            
+            # Obtener películas vistas
+            cursor.execute('''
+            SELECT movie_id FROM user_film WHERE user_id = ?
+            ''', (user_id,))
+            watched_movies = {row[0] for row in cursor.fetchall()}
+            
+            # Obtener películas calificadas
+            cursor.execute('''
+            SELECT movie_id FROM ratings WHERE user_id = ?
+            ''', (user_id,))
+            rated_movies = {row[0] for row in cursor.fetchall()}
+            
+            # Combinar películas vistas y calificadas
+            excluded_movies = watched_movies.union(rated_movies)
+            
+            # Obtener todas las películas no vistas/no calificadas
+            all_movies = set(self.movie_to_idx.keys())
+            available_movies = all_movies - excluded_movies
+            
+            # Predecir calificaciones para películas disponibles
             predictions = []
             self.model.eval()
             with torch.no_grad():
-                for movie_id in unrated_movies:
+                for movie_id in available_movies:
                     movie_idx = self.movie_to_idx.get(movie_id)
                     if movie_idx is not None:
                         user_input = torch.tensor([user_idx], dtype=torch.long).to(self.device)
                         movie_input = torch.tensor([movie_idx], dtype=torch.long).to(self.device)
                         prediction = self.model(user_input, movie_input)
                         predictions.append((movie_id, prediction.item()))
-
-            # Sort predictions and get worst recommendations
-            predictions.sort(key=lambda x: x[1])
+            
+            # Ordenar predicciones y obtener las peores
+            predictions.sort(key=lambda x: x[1])  # Ordenar por calificación (ascendente)
             worst_movies = [movie_id for movie_id, _ in predictions[:n_recommendations]]
-
-            # Get movie details
+            
+            # Obtener detalles de las películas
             recommendations = []
             for movie_id in worst_movies:
                 movie_data = self._get_movie_data(movie_id)
                 if movie_data:
                     recommendations.append(movie_data)
-
+            
             return recommendations
+            
         except Exception as e:
-            logger.error(f"Error getting worst collaborative recommendations: {str(e)}")
-            return []
+            logger.error(f"Error al obtener peores recomendaciones: {str(e)}")
+            raise
+        finally:
+            if 'conn' in locals():
+                conn.close()
 
     def __del__(self):
         """Cleanup when object is destroyed."""
