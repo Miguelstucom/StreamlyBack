@@ -309,7 +309,7 @@ class MovieRecommenderDL:
             # Obtener películas que el usuario ya ha visto
             conn = sqlite3.connect('data/tmdb_movies.db')
             cursor = conn.cursor()
-            
+
             # Obtener películas vistas
             cursor.execute('''
             SELECT movie_id FROM user_film WHERE user_id = ?
@@ -426,6 +426,12 @@ class MovieRecommenderDL:
 
     def __del__(self):
         """Cleanup when object is destroyed."""
-        if hasattr(self, 'model') and self.model is not None:
-            del self.model
-        torch.cuda.empty_cache()
+        try:
+            if hasattr(self, 'model') and self.model is not None:
+                self.model.cpu()  # Mover el modelo a CPU antes de eliminarlo
+                del self.model
+            if hasattr(self, 'device') and self.device.type == 'cuda':
+                torch.cuda.empty_cache()
+        except Exception:
+            # Silenciosamente ignoramos errores durante la limpieza
+            pass

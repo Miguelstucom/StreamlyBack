@@ -1,0 +1,4 @@
+Películas: 9622
+Géneros únicos en catálogo: 19
+Tiempo de construcción: 0.02s
+Tamaño genre_engine.pkl: 0.4 MB

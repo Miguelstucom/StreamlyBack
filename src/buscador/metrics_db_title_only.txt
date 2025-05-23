@@ -1,0 +1,5 @@
+Películas (desde DB): 9622
+Modelo de embedding: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+Dim vector: 384
+Tiempo total: 11.00 s
+Tamaño model_db_title_only.pkl: 15.1 MB

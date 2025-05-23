@@ -1,0 +1,6 @@
+Motor de Búsqueda por Overview (Sentence-Transformers)
+Películas con overview indexadas: 9617
+Modelo de embedding: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+Dimensión del vector: 384
+Tiempo total de construcción: 66.40 s
+Tamaño st_overview_engine.pkl: 14.99 MB

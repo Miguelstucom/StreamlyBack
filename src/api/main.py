@@ -30,6 +30,9 @@ from src.utils.generate_ratings_descriptions import generate_rating_description
 from src.utils.chatbot import MovieChatbot
 from src.utils.svd_recommender import SVDRecommender
 from src.utils.genre_recommender import GenreRecommender
+from fastapi import Depends, FastAPI, HTTPException
+from typing import Optional
+from src.utils.buscador_agente import inicializar_motores, buscar_peliculas_agente
 
 logger = logging.getLogger(__name__)
 
@@ -1274,4 +1277,34 @@ async def get_user_watch_history(
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if 'conn' in locals():
-            conn.close() 
+            conn.close()
+
+@app.on_event("startup")
+async def startup_event():
+    """
+    Carga los motores de búsqueda al arrancar la aplicación
+    para evitar recargas en cada llamada.
+    """
+    try:
+        inicializar_motores()
+    except Exception as e:
+        # Si no se inicializan, la API no debería arrancar correctamente
+        raise RuntimeError(f"No se pudo inicializar el buscador_pln: {e}")
+
+@app.get("/api/search")
+async def search_movies(
+    query: str,
+    tipo: Optional[str] = None,  # "title", "genre" o "overview", si quieres forzar
+    current_user: dict = Depends(get_current_user)  # o el dependency que uses
+):
+    """
+    Busca películas usando el agente_pln:
+
+    query: texto de búsqueda
+    tipo: opcional para forzar ['title','genre','overview']
+    """
+    try:
+        resultado = buscar_peliculas_agente(query_usuario=query, tipo_forzado=tipo)
+        return resultado
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

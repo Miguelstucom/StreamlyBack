@@ -18,7 +18,11 @@ class MovieChatbot:
         # Load model and tokenizer
         logger.info("Loading language model...")
         self.tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-medium")
-        self.model = AutoModelForCausalLM.from_pretrained("microsoft/DialoGPT-medium").to(self.device)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            "microsoft/DialoGPT-medium",
+            device_map=self.device,
+            use_safetensors=True
+        )
         
         # Load movie data
         self._load_movie_data()
