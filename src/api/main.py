@@ -1304,7 +1304,28 @@ async def search_movies(
     tipo: opcional para forzar ['title','genre','overview']
     """
     try:
+        # Obtener resultados del buscador
         resultado = buscar_peliculas_agente(query_usuario=query, tipo_forzado=tipo)
+        
+        # Obtener datos completos de cada película encontrada
+        movies_data = []
+        for movie in resultado["resultados"]:
+            # Buscar el movie_id por el título
+            conn = sqlite3.connect('data/tmdb_movies.db')
+            cursor = conn.cursor()
+            cursor.execute('SELECT movie_id FROM movies WHERE title = ?', (movie["titulo"],))
+            movie_id = cursor.fetchone()
+            conn.close()
+            
+            if movie_id:
+                # Obtener datos completos de la película
+                movie_data = get_movie_data(movie_id[0])
+                if movie_data:
+                    movies_data.append(movie_data)
+        
+        # Actualizar el resultado con los datos completos
+        resultado["resultados"] = movies_data
         return resultado
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
