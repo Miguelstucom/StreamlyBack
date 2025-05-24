@@ -30,9 +30,6 @@ from src.utils.generate_ratings_descriptions import generate_rating_description
 from src.utils.chatbot import MovieChatbot
 from src.utils.svd_recommender import SVDRecommender
 from src.utils.genre_recommender import GenreRecommender
-from fastapi import Depends, FastAPI, HTTPException
-from typing import Optional
-from src.utils.buscador_agente import inicializar_motores, buscar_peliculas_agente
 
 logger = logging.getLogger(__name__)
 
@@ -699,20 +696,6 @@ async def post_movie_review(
         user_id = user_result[0]
         print("User ID found:", user_id)
         
-        # Verificar que el usuario ha visto la película
-        cursor.execute('''
-        SELECT COUNT(*) 
-        FROM user_film 
-        WHERE user_id = ? AND movie_id = ?
-        ''', (user_id, movie_id))
-        has_watched = cursor.fetchone()[0] > 0
-        
-        if not has_watched:
-            raise HTTPException(
-                status_code=403,
-                detail="No puedes reseñar una película que no has visto. Primero debes marcar la película como vista."
-            )
-        
         # Check if user has already reviewed this movie
         cursor.execute('SELECT rating FROM ratings WHERE user_id = ? AND movie_id = ?', 
                       (user_id, movie_id))
@@ -1214,28 +1197,22 @@ async def get_user_watch_history(
         ''', (user_id,))
         total_movies = cursor.fetchone()[0]
         
-        # Obtener películas vistas con detalles, ordenadas por rowid descendente
+        # Obtener películas vistas con detalles
         cursor.execute('''
-        WITH LatestViews AS (
-            SELECT movie_id, MAX(rowid) as last_view
-            FROM user_film
-            WHERE user_id = ?
-            GROUP BY movie_id
-        )
         SELECT 
             m.*,
             GROUP_CONCAT(g.name) as genres,
             r.rating,
             r.description as review
-        FROM LatestViews lv
-        JOIN movies m ON lv.movie_id = m.movie_id
+        FROM user_film uf
+        JOIN movies m ON uf.movie_id = m.movie_id
         LEFT JOIN movie_genres mg ON m.movie_id = mg.movie_id
         LEFT JOIN genres g ON mg.genre_id = g.id
-        LEFT JOIN ratings r ON m.movie_id = r.movie_id AND r.user_id = ?
+        LEFT JOIN ratings r ON m.movie_id = r.movie_id AND r.user_id = uf.user_id
+        WHERE uf.user_id = ?
         GROUP BY m.movie_id
-        ORDER BY lv.last_view DESC
         LIMIT ? OFFSET ?
-        ''', (user_id, user_id, limit, offset))
+        ''', (user_id, limit, offset))
         
         movies = cursor.fetchall()
         if not movies:
@@ -1277,55 +1254,4 @@ async def get_user_watch_history(
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if 'conn' in locals():
-            conn.close()
-
-@app.on_event("startup")
-async def startup_event():
-    """
-    Carga los motores de búsqueda al arrancar la aplicación
-    para evitar recargas en cada llamada.
-    """
-    try:
-        inicializar_motores()
-    except Exception as e:
-        # Si no se inicializan, la API no debería arrancar correctamente
-        raise RuntimeError(f"No se pudo inicializar el buscador_pln: {e}")
-
-@app.get("/api/search")
-async def search_movies(
-    query: str,
-    tipo: Optional[str] = None,  # "title", "genre" o "overview", si quieres forzar
-    current_user: dict = Depends(get_current_user)  # o el dependency que uses
-):
-    """
-    Busca películas usando el agente_pln:
-
-    query: texto de búsqueda
-    tipo: opcional para forzar ['title','genre','overview']
-    """
-    try:
-        # Obtener resultados del buscador
-        resultado = buscar_peliculas_agente(query_usuario=query, tipo_forzado=tipo)
-        
-        # Obtener datos completos de cada película encontrada
-        movies_data = []
-        for movie in resultado["resultados"]:
-            # Buscar el movie_id por el título
-            conn = sqlite3.connect('data/tmdb_movies.db')
-            cursor = conn.cursor()
-            cursor.execute('SELECT movie_id FROM movies WHERE title = ?', (movie["titulo"],))
-            movie_id = cursor.fetchone()
-            conn.close()
-            
-            if movie_id:
-                # Obtener datos completos de la película
-                movie_data = get_movie_data(movie_id[0])
-                if movie_data:
-                    movies_data.append(movie_data)
-        
-        # Actualizar el resultado con los datos completos
-        resultado["resultados"] = movies_data
-        return resultado
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+            conn.close() 
