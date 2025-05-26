@@ -70,6 +70,24 @@ def calculate_rf_scores():
         kmeans = KMeans(n_clusters=optimal_k, random_state=42)
         rf_normalized['Cluster'] = kmeans.fit_predict(rf_normalized)
         
+        # Guardar los clusters en la base de datos
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_cluster (
+                user_id INTEGER PRIMARY KEY,
+                cluster INTEGER
+            )
+        ''')
+        conn.commit()
+        for user_id, row in rf_normalized.iterrows():
+            cluster = int(row['Cluster'])
+            cursor.execute('''
+                INSERT INTO user_cluster (user_id, cluster)
+                VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET cluster=excluded.cluster
+            ''', (user_id, cluster))
+        conn.commit()
+        
         # Crear gráfica de dispersión
         plt.figure(figsize=(12, 8))
         sns.scatterplot(

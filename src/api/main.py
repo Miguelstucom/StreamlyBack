@@ -30,6 +30,9 @@ from src.utils.generate_ratings_descriptions import generate_rating_description
 from src.utils.chatbot import MovieChatbot
 from src.utils.svd_recommender import SVDRecommender
 from src.utils.genre_recommender import GenreRecommender
+from fastapi import Depends, FastAPI, HTTPException
+from typing import Optional
+from src.utils.buscador_agente import inicializar_motores, buscar_peliculas_agente
 
 logger = logging.getLogger(__name__)
 
@@ -402,8 +405,6 @@ async def get_user_recommendations(
             user_id,
             request.n_recommendations
         )
-        print("las mejores")
-        print(recommendations)
         return {"recommendations": recommendations}
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -1092,39 +1093,62 @@ async def add_user_film(
 # Inicializar el recomendador SVD
 svd_recommender = SVDRecommender()
 
+
 @app.get("/recommendations/svd/{user_id}")
 async def get_svd_recommendations(
-    user_id: int,
-    current_user: dict = Depends(get_current_user)
+        user_id: int,
+        current_user: dict = Depends(get_current_user)
 ):
-    """Obtiene recomendaciones de películas basadas en SVD para un usuario."""
+    """Obtiene recomendaciones SVD para un usuario basadas en su cluster."""
     try:
-        # Verificar que el usuario existe y coincide con el usuario actual
+        # Obtener el cluster del usuario
         conn = sqlite3.connect('data/tmdb_movies.db')
         cursor = conn.cursor()
-        cursor.execute('SELECT userId FROM users WHERE email = ?', (current_user['email'],))
-        user_result = cursor.fetchone()
-        if not user_result or user_result[0] != user_id:
+
+        cursor.execute('''
+        SELECT cluster 
+        FROM user_cluster 
+        WHERE user_id = ?
+        ''', (user_id,))
+
+        result = cursor.fetchone()
+        if not result:
             raise HTTPException(
-                status_code=403,
-                detail="No tienes permiso para obtener recomendaciones para este usuario"
+                status_code=404,
+                detail=f"Usuario {user_id} no encontrado en ningún cluster"
             )
-        
-        # Obtener recomendaciones
-        recommendations = svd_recommender.get_recommendations(user_id)
-        
+
+        cluster = result[0]
+
+        # Obtener películas ya vistas por el usuario
+        cursor.execute('''
+        SELECT movie_id 
+        FROM user_film 
+        WHERE user_id = ?
+        ''', (user_id,))
+        seen_movies = {row[0] for row in cursor.fetchall()}
+
+        # Obtener recomendaciones usando el cluster
+        recommender = SVDRecommender()
+        all_recommendations = recommender.get_recommendations(cluster=cluster)
+
+        # Filtrar películas ya vistas por el usuario
+        recommendations = [
+            movie for movie in all_recommendations
+            if movie['movie_id'] not in seen_movies
+        ]
+
         return {
             "user_id": user_id,
+            "cluster": cluster,
             "recommendations": recommendations
         }
-        
-    except HTTPException:
-        raise
+
     except Exception as e:
         logger.error(f"Error al obtener recomendaciones SVD: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail="Error al obtener recomendaciones"
+            detail=f"Error al obtener recomendaciones: {str(e)}"
         )
     finally:
         if 'conn' in locals():
@@ -1254,4 +1278,55 @@ async def get_user_watch_history(
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if 'conn' in locals():
-            conn.close() 
+            conn.close()
+
+@app.on_event("startup")
+async def startup_event():
+    """
+    Carga los motores de búsqueda al arrancar la aplicación
+    para evitar recargas en cada llamada.
+    """
+    try:
+        inicializar_motores()
+    except Exception as e:
+        # Si no se inicializan, la API no debería arrancar correctamente
+        raise RuntimeError(f"No se pudo inicializar el buscador_pln: {e}")
+
+@app.get("/api/search")
+async def search_movies(
+    query: str,
+    tipo: Optional[str] = None,  # "title", "genre" o "overview", si quieres forzar
+    current_user: dict = Depends(get_current_user)  # o el dependency que uses
+):
+    """
+    Busca películas usando el agente_pln:
+
+    query: texto de búsqueda
+    tipo: opcional para forzar ['title','genre','overview']
+    """
+    try:
+        # Obtener resultados del buscador
+        resultado = buscar_peliculas_agente(query_usuario=query, tipo_forzado=tipo)
+
+        # Obtener datos completos de cada película encontrada
+        movies_data = []
+        for movie in resultado["resultados"]:
+            # Buscar el movie_id por el título
+            conn = sqlite3.connect('data/tmdb_movies.db')
+            cursor = conn.cursor()
+            cursor.execute('SELECT movie_id FROM movies WHERE title = ?', (movie["titulo"],))
+            movie_id = cursor.fetchone()
+            conn.close()
+
+            if movie_id:
+                # Obtener datos completos de la película
+                movie_data = get_movie_data(movie_id[0])
+                if movie_data:
+                    movies_data.append(movie_data)
+
+        # Actualizar el resultado con los datos completos
+        resultado["resultados"] = movies_data
+        return resultado
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
