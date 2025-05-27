@@ -1093,62 +1093,103 @@ async def add_user_film(
 # Inicializar el recomendador SVD
 svd_recommender = SVDRecommender()
 
-
 @app.get("/recommendations/svd/{user_id}")
 async def get_svd_recommendations(
-        user_id: int,
-        current_user: dict = Depends(get_current_user)
+    user_id: int,
+    current_user: dict = Depends(get_current_user),
+    n_recommendations: int = 10
 ):
-    """Obtiene recomendaciones SVD para un usuario basadas en su cluster."""
+    """Obtiene recomendaciones de películas basadas en SVD para un usuario."""
     try:
-        # Obtener el cluster del usuario
+        # Verificar que el usuario existe y coincide con el usuario actual
         conn = sqlite3.connect('data/tmdb_movies.db')
         cursor = conn.cursor()
-
-        cursor.execute('''
-        SELECT cluster 
-        FROM user_cluster 
-        WHERE user_id = ?
-        ''', (user_id,))
-
-        result = cursor.fetchone()
-        if not result:
+        cursor.execute('SELECT userId FROM users WHERE email = ?', (current_user['email'],))
+        user_result = cursor.fetchone()
+        if not user_result or user_result[0] != user_id:
             raise HTTPException(
-                status_code=404,
-                detail=f"Usuario {user_id} no encontrado en ningún cluster"
+                status_code=403,
+                detail="No tienes permiso para obtener recomendaciones para este usuario"
             )
-
-        cluster = result[0]
-
+        
+        # Obtener recomendaciones
+        recommendations = svd_recommender.get_recommendations(user_id, n_recommendations)
+        
         # Obtener películas ya vistas por el usuario
-        cursor.execute('''
-        SELECT movie_id 
-        FROM user_film 
-        WHERE user_id = ?
-        ''', (user_id,))
-        seen_movies = {row[0] for row in cursor.fetchall()}
-
-        # Obtener recomendaciones usando el cluster
-        recommender = SVDRecommender()
-        all_recommendations = recommender.get_recommendations(cluster=cluster)
-
-        # Filtrar películas ya vistas por el usuario
-        recommendations = [
-            movie for movie in all_recommendations
-            if movie['movie_id'] not in seen_movies
-        ]
-
+        cursor.execute('SELECT movie_id FROM user_film WHERE user_id = ?', (user_id,))
+        watched_movies = {row[0] for row in cursor.fetchall()}
+        
+        # Obtener detalles de las películas recomendadas
+        recommended_movies = []
+        for movie_id, score in recommendations:
+            # Saltar películas ya vistas
+            if movie_id in watched_movies:
+                continue
+                
+            # Obtener información básica de la película
+            cursor.execute('''
+            WITH MovieRatings AS (
+                SELECT 
+                    movie_id,
+                    COUNT(rating) as rating_count,
+                    AVG(rating) as avg_rating
+                FROM ratings
+                WHERE movie_id = ?
+                GROUP BY movie_id
+            )
+            SELECT 
+                m.*,
+                GROUP_CONCAT(DISTINCT g.name) as genres,
+                COALESCE(mr.rating_count, 0) as rating_count,
+                COALESCE(mr.avg_rating, 0) as avg_rating
+            FROM movies m
+            LEFT JOIN movie_genres mg ON m.movie_id = mg.movie_id
+            LEFT JOIN genres g ON mg.genre_id = g.id
+            LEFT JOIN MovieRatings mr ON m.movie_id = mr.movie_id
+            WHERE m.movie_id = ?
+            GROUP BY m.movie_id
+            ''', (movie_id, movie_id))
+            
+            movie = cursor.fetchone()
+            if movie:
+                # Convertir resultado a diccionario
+                columns = [description[0] for description in cursor.description]
+                movie_dict = dict(zip(columns, movie))
+                
+                # Convertir géneros de string a lista
+                if movie_dict['genres']:
+                    movie_dict['genres'] = list(set(movie_dict['genres'].split(',')))
+                else:
+                    movie_dict['genres'] = []
+                
+                # Añadir score de recomendación
+                movie_dict['recommendation_score'] = float(score)
+                
+                # Asegurar que los valores numéricos sean del tipo correcto
+                if 'rating_count' in movie_dict:
+                    movie_dict['rating_count'] = int(movie_dict['rating_count'])
+                if 'avg_rating' in movie_dict:
+                    movie_dict['avg_rating'] = float(movie_dict['avg_rating']) if movie_dict['avg_rating'] else None
+                
+                recommended_movies.append(movie_dict)
+                
+                # Si ya tenemos suficientes recomendaciones, salir del bucle
+                if len(recommended_movies) >= n_recommendations:
+                    break
+        
         return {
             "user_id": user_id,
-            "cluster": cluster,
-            "recommendations": recommendations
+            "total_recommendations": len(recommended_movies),
+            "recommendations": recommended_movies
         }
-
+        
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error al obtener recomendaciones SVD: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"Error al obtener recomendaciones: {str(e)}"
+            detail="Error al obtener recomendaciones"
         )
     finally:
         if 'conn' in locals():
@@ -1330,3 +1371,90 @@ async def search_movies(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/movies/popular/recent")
+async def get_recent_popular_movies(
+    current_user: dict = Depends(get_current_user),
+    limit: int = 10
+) -> Dict:
+    """Obtiene las películas más populares de los últimos 2 años antes de 2018, excluyendo las vistas por el usuario."""
+    try:
+        conn = sqlite3.connect('data/tmdb_movies.db')
+        cursor = conn.cursor()
+        
+        # Get user ID from email
+        cursor.execute('SELECT userId FROM users WHERE email = ?', (current_user['email'],))
+        user_result = cursor.fetchone()
+        if not user_result:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        user_id = user_result[0]
+        
+        # Calcular la fecha de 2 años antes de 2018
+        from datetime import datetime
+        two_years_before_2018 = "2016-01-01"
+        
+        # Obtener películas populares de los últimos 2 años antes de 2018
+        cursor.execute('''
+        WITH UserWatchedMovies AS (
+            SELECT movie_id 
+            FROM user_film 
+            WHERE user_id = ?
+        ),
+        MovieRatings AS (
+            SELECT 
+                movie_id,
+                COUNT(rating) as rating_count,
+                AVG(rating) as avg_rating
+            FROM ratings
+            GROUP BY movie_id
+        )
+        SELECT 
+            m.*,
+            COALESCE(mr.rating_count, 0) as rating_count,
+            COALESCE(mr.avg_rating, 0) as avg_rating,
+            m.popularity
+        FROM movies m
+        LEFT JOIN MovieRatings mr ON m.movie_id = mr.movie_id
+        WHERE m.release_date >= ?
+        AND m.release_date <= '2018-12-31'
+        AND m.movie_id NOT IN (SELECT movie_id FROM UserWatchedMovies)
+        ORDER BY m.popularity DESC
+        LIMIT ?
+        ''', (user_id, two_years_before_2018, limit))
+        
+        movies = cursor.fetchall()
+        if not movies:
+            return {
+                "total_movies": 0,
+                "movies": []
+            }
+            
+        # Get column names
+        columns = [description[0] for description in cursor.description]
+        
+        # Convert to list of dictionaries
+        movies_list = []
+        for movie in movies:
+            movie_dict = dict(zip(columns, movie))
+            
+            # Asegurar que los valores numéricos sean del tipo correcto
+            if 'rating_count' in movie_dict:
+                movie_dict['rating_count'] = int(movie_dict['rating_count'])
+            if 'avg_rating' in movie_dict:
+                movie_dict['avg_rating'] = float(movie_dict['avg_rating']) if movie_dict['avg_rating'] else None
+            if 'popularity' in movie_dict:
+                movie_dict['popularity'] = float(movie_dict['popularity'])
+            
+            movies_list.append(movie_dict)
+        
+        return {
+            "total_movies": len(movies_list),
+            "movies": movies_list
+        }
+        
+    except Exception as e:
+        logger.error(f"Error al obtener películas populares recientes: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if 'conn' in locals():
+            conn.close()

@@ -125,7 +125,6 @@ class GenreRecommender:
             # Dividir en train y test
             train_size = int(len(self.user_genre_matrix) * 0.8)
             train_matrix = self.user_genre_matrix.iloc[:train_size]
-            print(train_matrix)
             test_matrix = self.user_genre_matrix.iloc[train_size:]
             
             return train_matrix, test_matrix

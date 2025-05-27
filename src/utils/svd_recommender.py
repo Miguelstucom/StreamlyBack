@@ -9,22 +9,93 @@ from pathlib import Path
 from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics import mean_squared_error, accuracy_score, precision_score, recall_score, f1_score
 import matplotlib.pyplot as plt
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import math
+import os
+from scipy.sparse import csr_matrix
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class SVDRecommender:
-    def __init__(self):
-        self.model = None
-        self.model_path = Path('models/svd_model.pkl')
-        self.model_path.parent.mkdir(exist_ok=True)
-        self.svd = None
-        self.user_movie_matrix = None
-        self.n_components = None
-        self.explained_variance_ratio = None
+    def __init__(self, db_path: str = 'data/tmdb_movies.db', models_dir: str = 'models/svd'):
+        self.db_path = db_path
+        self.models_dir = Path(models_dir)
+        self.models: Dict[int, SVD] = {}  # Dictionary to store models per cluster
+        self.top_movies_per_cluster: Dict[int, List[int]] = {}  # Store top movies per cluster
+        self.reader = Reader(rating_scale=(0, 1))
+
+        # Crear directorio de modelos si no existe
+        self.models_dir.mkdir(parents=True, exist_ok=True)
+
+        # Intentar cargar modelos al inicializar
+        self._initialize_models()
+
+    def _initialize_models(self):
+        """Inicializa los modelos al crear la instancia."""
+        try:
+            # Verificar si hay modelos guardados
+            model_files = list(self.models_dir.glob('svd_model_cluster_*.pkl'))
+            if not model_files:
+                logger.warning("No se encontraron modelos guardados. Entrenando nuevos modelos...")
+                self.train()
+            else:
+                # Intentar cargar modelos existentes
+                if not self.load_models():
+                    logger.warning("Error al cargar modelos existentes. Entrenando nuevos modelos...")
+                    self.train()
+        except Exception as e:
+            logger.error(f"Error al inicializar modelos: {str(e)}")
+            raise
+
+    def _get_top_movies_per_cluster(self, cluster_id: int, limit: int = 1000) -> List[int]:
+        """Obtiene las películas más vistas para un cluster específico."""
+        query = """
+        WITH UserClusterMovies AS (
+            SELECT 
+                uf.movie_id,
+                COUNT(*) as view_count
+            FROM user_film uf
+            JOIN user_cluster uc ON uf.user_id = uc.user_id
+            WHERE uc.cluster = ?
+            GROUP BY uf.movie_id
+        )
+        SELECT movie_id
+        FROM UserClusterMovies
+        ORDER BY view_count DESC
+        LIMIT ?
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql_query(query, conn, params=(cluster_id, limit))['movie_id'].tolist()
+
+    def _get_cluster_data(self, cluster_id: int) -> pd.DataFrame:
+        """Obtiene los datos de ratings para un cluster específico."""
+        query = """
+        SELECT 
+            uf.user_id,
+            uf.movie_id,
+            1 as rating
+        FROM user_film uf
+        JOIN user_cluster uc ON uf.user_id = uc.user_id
+        WHERE uc.cluster = ?
+        AND uf.movie_id IN (
+            SELECT movie_id 
+            FROM (
+                SELECT 
+                    movie_id,
+                    COUNT(*) as view_count
+                FROM user_film uf2
+                JOIN user_cluster uc2 ON uf2.user_id = uc2.user_id
+                WHERE uc2.cluster = ?
+                GROUP BY movie_id
+                ORDER BY view_count DESC
+                LIMIT 1000
+            )
+        )
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql_query(query, conn, params=(cluster_id, cluster_id))
 
     def _calculate_metrics(self, y_true: np.ndarray, y_pred: np.ndarray, k: int = 10) -> Dict:
         """Calcula todas las métricas de evaluación."""
@@ -42,8 +113,9 @@ class SVDRecommender:
         logger.info(f"Desviación estándar de predicciones: {np.std(y_pred):.4f}")
 
         # Calcular umbral adaptativo basado en la distribución de los datos
-        threshold = np.mean(y_true) + 0.5 * np.std(y_true)
-        logger.info(f"Umbral de clasificación adaptativo: {threshold:.4f}")
+        # Usar un umbral más estricto para la clasificación binaria
+        threshold = np.percentile(y_true, 75)  # Usar el percentil 75 como umbral
+        logger.info(f"Umbral de clasificación (percentil 75): {threshold:.4f}")
 
         # Métricas de clasificación
         y_true_binary = (y_true >= threshold).astype(int)
@@ -54,10 +126,12 @@ class SVDRecommender:
         logger.info(f"Positivos reales: {np.sum(y_true_binary)}")
         logger.info(f"Positivos predichos: {np.sum(y_pred_binary)}")
         logger.info(f"Total de muestras: {len(y_true)}")
+        logger.info(f"Proporción de positivos reales: {np.mean(y_true_binary):.4f}")
+        logger.info(f"Proporción de positivos predichos: {np.mean(y_pred_binary):.4f}")
 
         # Calcular métricas con manejo de casos especiales
         accuracy = accuracy_score(y_true_binary.flatten(), y_pred_binary.flatten())
-
+        
         # Calcular precision y recall solo si hay predicciones positivas
         if np.sum(y_pred_binary) > 0:
             precision = precision_score(y_true_binary.flatten(), y_pred_binary.flatten(), zero_division=0)
@@ -69,48 +143,109 @@ class SVDRecommender:
             f1 = 0
             logger.warning("No se encontraron predicciones positivas")
 
-        # Precision@K, Recall@K, NDCG@K, MAP@K, Hit Rate@K
+        logger.info(f"\nMétricas de clasificación:")
+        logger.info(f"Accuracy: {accuracy:.4f}")
+        logger.info(f"Precision: {precision:.4f}")
+        logger.info(f"Recall: {recall:.4f}")
+        logger.info(f"F1-Score: {f1:.4f}")
+
+        # Reconstruir matrices de usuario-item
+        user_ids = np.array([pred.uid for pred in self.test_predictions])
+        item_ids = np.array([pred.iid for pred in self.test_predictions])
+        ratings_true = np.array([pred.r_ui for pred in self.test_predictions])
+        ratings_pred = np.array([pred.est for pred in self.test_predictions])
+
+        # Crear matrices dispersas
+        n_users = len(np.unique(user_ids))
+        n_items = len(np.unique(item_ids))
+        
+        # Mapear IDs a índices
+        user_map = {uid: i for i, uid in enumerate(np.unique(user_ids))}
+        item_map = {iid: i for i, iid in enumerate(np.unique(item_ids))}
+        
+        # Convertir IDs a índices
+        user_indices = np.array([user_map[uid] for uid in user_ids])
+        item_indices = np.array([item_map[iid] for iid in item_ids])
+        
+        # Crear matrices
+        matrix_true = csr_matrix((ratings_true, (user_indices, item_indices)), shape=(n_users, n_items))
+        matrix_pred = csr_matrix((ratings_pred, (user_indices, item_indices)), shape=(n_users, n_items))
+
+        # Métricas de ranking
         precision_k = 0
         recall_k = 0
         ndcg_k = 0
         map_k = 0
         hit_rate_k = 0
-        n_users = len(y_true)
-
-        for i in range(n_users):
-            # Obtener top-K predicciones y verdaderos valores
-            pred_top_k = np.argsort(y_pred[i])[-k:]
-            true_top_k = np.argsort(y_true[i])[-k:]
-
+        n_users_with_relevant = 0
+        
+        for user_idx in range(n_users):
+            # Obtener predicciones y valores reales para este usuario
+            user_true = matrix_true[user_idx].toarray().flatten()
+            user_pred = matrix_pred[user_idx].toarray().flatten()
+            
+            # Obtener top-K items según predicciones
+            top_k_items = np.argsort(user_pred)[-k:]
+            
+            # Obtener items relevantes (con rating >= threshold)
+            relevant_items = np.where(user_true >= threshold)[0]
+            
+            if len(relevant_items) == 0:
+                continue
+                
+            n_users_with_relevant += 1
+            
             # Precision@K
-            hits = len(set(pred_top_k) & set(true_top_k))
-            precision_k += hits / k
-
+            hits = len(set(top_k_items) & set(relevant_items))
+            precision_k += hits / k if k > 0 else 0
+            
             # Recall@K
-            total_relevant = len(true_top_k)
-            recall_k += hits / total_relevant if total_relevant > 0 else 0
-
+            recall_k += hits / len(relevant_items)
+            
             # NDCG@K
             dcg = 0
             idcg = 0
-            for j, item in enumerate(pred_top_k):
-                if item in true_top_k:
-                    dcg += 1 / math.log2(j + 2)
-            for j in range(min(k, total_relevant)):
-                idcg += 1 / math.log2(j + 2)
+            
+            # Calcular DCG
+            for i, item in enumerate(top_k_items):
+                if item in relevant_items:
+                    dcg += 1 / np.log2(i + 2)
+            
+            # Calcular IDCG (ranking ideal)
+            ideal_ranking = np.argsort(user_true)[::-1][:k]
+            for i, item in enumerate(ideal_ranking):
+                if user_true[item] >= threshold:
+                    idcg += 1 / np.log2(i + 2)
+            
             ndcg_k += dcg / idcg if idcg > 0 else 0
-
+            
             # MAP@K
             ap = 0
             hits = 0
-            for j, item in enumerate(pred_top_k):
-                if item in true_top_k:
+            for i, item in enumerate(top_k_items):
+                if item in relevant_items:
                     hits += 1
-                    ap += hits / (j + 1)
-            map_k += ap / min(k, total_relevant) if total_relevant > 0 else 0
-
+                    ap += hits / (i + 1)
+            map_k += ap / min(k, len(relevant_items))
+            
             # Hit Rate@K
-            hit_rate_k += 1 if len(set(pred_top_k) & set(true_top_k)) > 0 else 0
+            hit_rate_k += 1 if len(set(top_k_items) & set(relevant_items)) > 0 else 0
+
+        # Normalizar métricas
+        if n_users_with_relevant > 0:
+            precision_k /= n_users_with_relevant
+            recall_k /= n_users_with_relevant
+            ndcg_k /= n_users_with_relevant
+            map_k /= n_users_with_relevant
+            hit_rate_k /= n_users_with_relevant
+
+        logger.info(f"\nMétricas de ranking:")
+        logger.info(f"Usuarios con items relevantes: {n_users_with_relevant}")
+        logger.info(f"Precision@{k}: {precision_k:.4f}")
+        logger.info(f"Recall@{k}: {recall_k:.4f}")
+        logger.info(f"NDCG@{k}: {ndcg_k:.4f}")
+        logger.info(f"MAP@{k}: {map_k:.4f}")
+        logger.info(f"HitRate@{k}: {hit_rate_k:.4f}")
 
         return {
             'MSE': mse,
@@ -119,28 +254,29 @@ class SVDRecommender:
             'Precision': precision,
             'Recall': recall,
             'F1-Score': f1,
-            f'Precision@{k}': precision_k / n_users,
-            f'Recall@{k}': recall_k / n_users,
-            f'NDCG@{k}': ndcg_k / n_users,
-            f'MAP@{k}': map_k / n_users,
-            f'HitRate@{k}': hit_rate_k / n_users
+            f'Precision@{k}': precision_k,
+            f'Recall@{k}': recall_k,
+            f'NDCG@{k}': ndcg_k,
+            f'MAP@{k}': map_k,
+            f'HitRate@{k}': hit_rate_k
         }
 
-    def _plot_variance_analysis(self, max_components: int = 500):
+    def _plot_variance_analysis(self, max_components: int = 500, cluster_id: int = None):
         """Analiza y grafica la varianza explicada por los componentes."""
-        # Obtener dimensiones de la matriz
-        n_users, n_movies = self.user_movie_matrix.shape
-        max_possible_components = min(n_users, n_movies)
-        logger.info(f"\nDimensiones de la matriz: {n_users} usuarios x {n_movies} películas")
-        logger.info(f"Número máximo posible de componentes: {max_possible_components}")
+        if self.user_movie_matrix is None or self.user_movie_matrix.empty:
+            logger.error("No hay matriz de usuario-película disponible para el análisis de varianza")
+            return None
 
+        # Asegurar que max_components no exceda el número de columnas
+        max_components = min(max_components, self.user_movie_matrix.shape[1])
+        
         # Calcular varianza explicada para diferentes números de componentes
         variances = []
         components_range = []
         current_components = 1
         target_variance = 0.95
 
-        while True:
+        while current_components <= max_components:
             svd = TruncatedSVD(n_components=current_components, random_state=42)
             svd.fit(self.user_movie_matrix)
             current_variance = svd.explained_variance_ratio_.sum()
@@ -149,7 +285,7 @@ class SVDRecommender:
 
             logger.info(f"Componentes {current_components}: {current_variance*100:.2f}% de varianza explicada")
 
-            if current_variance >= target_variance or current_components >= max_components or current_components >= max_possible_components:
+            if current_variance >= target_variance:
                 break
 
             # Incrementar el número de componentes
@@ -190,7 +326,6 @@ class SVDRecommender:
         logger.info(f"- Dimensión original: {original_dim}")
         logger.info(f"- Componentes necesarios para {best_target*100:.2f}% varianza: {n_components_best}")
         logger.info(f"- Reducción de dimensionalidad: {reduction:.2f}%")
-        logger.info(f"- Componentes máximos posibles: {max_possible_components}")
 
         # Crear gráfica
         plt.figure(figsize=(10, 6))
@@ -209,41 +344,42 @@ class SVDRecommender:
 
         plt.xlabel('Número de Componentes')
         plt.ylabel('Varianza Explicada Acumulada')
-        plt.title('Análisis de Varianza Explicada por SVD')
+        plt.title(f'Análisis de Varianza Explicada por SVD - Cluster {cluster_id}')
         plt.grid(True)
         plt.legend()
 
         # Guardar gráfica
-        plt.savefig('svd_variance_analysis.png')
+        plt.savefig(f'models/svd_variance_analysis_cluster_{cluster_id}.png')
         plt.close()
 
         return n_components_best
 
     def prepare_data(self):
-        """Prepara los datos para el entrenamiento usando views agrupadas por cluster."""
+        """Prepara los datos para el entrenamiento usando views en vez de ratings."""
         try:
             conn = sqlite3.connect('data/tmdb_movies.db')
 
-            # Obtener datos de visualizaciones agrupadas por cluster
+            # Obtener datos de visualizaciones
             query = """
-            SELECT uc.cluster, uf.movie_id, COUNT(*) as view_count
-            FROM user_film uf
-            JOIN user_cluster uc ON uf.user_id = uc.user_id
-            GROUP BY uc.cluster, uf.movie_id
+            SELECT user_id, movie_id
+            FROM user_film
             """
             df = pd.read_sql_query(query, conn)
 
-            # Crear matriz de cluster-película
+            # Crear columna 'view' con valor 1 (binario: visto/no visto)
+            df['view'] = 1
+
+            # Crear matriz de usuario-película binaria
             self.user_movie_matrix = df.pivot_table(
-                index='cluster',
+                index='user_id',
                 columns='movie_id',
-                values='view_count',
+                values='view',
                 fill_value=0
             )
 
-            # Crear dataset para Surprise (usando conteo de views como escala)
-            df_surprise = df[['cluster', 'movie_id', 'view_count']]
-            reader = Reader(rating_scale=(0, df['view_count'].max()))
+            # Crear dataset para Surprise (usando 0-1 como escala)
+            df_surprise = df[['user_id', 'movie_id', 'view']]
+            reader = Reader(rating_scale=(0, 1))
             data = Dataset.load_from_df(
                 df_surprise,
                 reader
@@ -252,9 +388,8 @@ class SVDRecommender:
             # Dividir en train y test
             trainset, testset = train_test_split(data, test_size=0.2)
 
-            logger.info(f"Matriz de cluster-película (views):\n{self.user_movie_matrix}")
+            logger.info(f"Matriz de usuario-película (views):\n{self.user_movie_matrix}")
             logger.info(f"Dimensiones de la matriz: {self.user_movie_matrix.shape}")
-            logger.info(f"Rango de views por cluster-película: [{df['view_count'].min()}, {df['view_count'].max()}]")
 
             return trainset, testset
 
@@ -265,172 +400,270 @@ class SVDRecommender:
             if 'conn' in locals():
                 conn.close()
 
-    def train(self):
-        """Entrena el modelo SVD."""
+    def save_models(self):
+        """Guarda los modelos y las películas top por cluster."""
         try:
-            trainset, testset = self.prepare_data()
+            # Guardar modelos
+            for cluster_id, model in self.models.items():
+                model_path = self.models_dir / f'svd_model_cluster_{cluster_id}.pkl'
+                with open(model_path, 'wb') as f:
+                    pickle.dump(model, f)
+                logger.info(f"Modelo guardado para cluster {cluster_id} en {model_path}")
 
-            # Crear y entrenar modelo
-            self.model = SVD(n_factors=50, n_epochs=20, lr_all=0.005, reg_all=0.02)
-            self.model.fit(trainset)
-
-            # Evaluar modelo
-            predictions = self.model.test(testset)
-            y_true = []
-            y_pred = []
-            for pred in predictions:
-                y_true.append(pred.r_ui)
-                y_pred.append(pred.est)
-            y_true = np.array(y_true)
-            y_pred = np.array(y_pred)
-
-            # Calcular métricas del modelo SVD de Surprise
-            svd_metrics = self._calculate_metrics(y_true.reshape(1, -1), y_pred.reshape(1, -1), k=10)
-            logger.info("\nMétricas del modelo SVD de Surprise (test):")
-            for metric, value in svd_metrics.items():
-                logger.info(f"{metric}: {value:.4f}")
-
-            rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
-            logger.info(f"RMSE del modelo: {rmse}")
-
-            # Guardar modelo
-            with open(self.model_path, 'wb') as f:
-                pickle.dump(self.model, f)
-
-            logger.info("Modelo entrenado y guardado exitosamente")
-
-            # Entrenar modelo con TruncatedSVD
-            n_components = self._plot_variance_analysis()
-            logger.info(f"Número de componentes seleccionados para explicar 95% de varianza: {n_components}")
-
-            self.svd = TruncatedSVD(n_components=n_components, random_state=42)
-            self.svd.fit(self.user_movie_matrix)
-            self.explained_variance_ratio = self.svd.explained_variance_ratio_
-
-            # Mostrar varianza explicada por cada componente
-            for i, var in enumerate(self.explained_variance_ratio):
-                logger.info(f"Componente {i+1}: {var:.4f} ({var*100:.2f}%)")
-
-            # Calcular métricas
-            train_pred = self.svd.inverse_transform(self.svd.transform(self.user_movie_matrix))
-
-            # Dividir en train y test para métricas
-            train_size = int(len(self.user_movie_matrix) * 0.8)
-            train_matrix = self.user_movie_matrix.iloc[:train_size]
-            test_matrix = self.user_movie_matrix.iloc[train_size:]
-
-            train_metrics = self._calculate_metrics(train_matrix.values, train_pred[:train_size])
-            test_metrics = self._calculate_metrics(test_matrix.values, train_pred[train_size:])
-
-            # Logging de métricas
-            logger.info("Métricas de entrenamiento:")
-            for metric, value in train_metrics.items():
-                logger.info(f"{metric}: {value:.4f}")
-
-            logger.info("\nMétricas de prueba:")
-            for metric, value in test_metrics.items():
-                logger.info(f"{metric}: {value:.4f}")
-
-            return train_metrics, test_metrics
+            # Guardar películas top por cluster
+            top_movies_path = self.models_dir / 'top_movies_per_cluster.pkl'
+            with open(top_movies_path, 'wb') as f:
+                pickle.dump(self.top_movies_per_cluster, f)
+            logger.info(f"Películas top guardadas en {top_movies_path}")
 
         except Exception as e:
-            logger.error(f"Error al entrenar modelo: {str(e)}")
+            logger.error(f"Error al guardar modelos: {str(e)}")
             raise
 
-    def load_model(self):
-        """Carga el modelo guardado."""
+    def load_models(self):
+        """Carga los modelos y las películas top por cluster."""
         try:
-            if self.model_path.exists():
-                with open(self.model_path, 'rb') as f:
-                    self.model = pickle.load(f)
-                logger.info("Modelo cargado exitosamente")
-            else:
-                logger.info("No se encontró modelo guardado, entrenando nuevo modelo...")
-                self.train()
-        except Exception as e:
-            logger.error(f"Error al cargar modelo: {str(e)}")
-            raise
+            # Verificar que el directorio existe
+            if not self.models_dir.exists():
+                logger.error(f"El directorio de modelos {self.models_dir} no existe")
+                return False
 
-    def get_recommendations(self, cluster: int, n_recommendations: int = 20) -> List[Dict]:
-        """Obtiene recomendaciones de películas para un cluster."""
-        try:
-            if self.model is None:
-                self.load_model()
-
-            conn = sqlite3.connect('data/tmdb_movies.db')
-            cursor = conn.cursor()
-
-            # Obtener todas las películas
-            cursor.execute('SELECT movie_id FROM movies')
-            all_movies = {row[0] for row in cursor.fetchall()}
-
-            # Predecir ratings para todas las películas
-            predictions = []
-            for movie_id in all_movies:
+            # Cargar películas top por cluster
+            top_movies_path = self.models_dir / 'top_movies_per_cluster.pkl'
+            if top_movies_path.exists():
                 try:
-                    pred = self.model.predict(cluster, movie_id)
-                    predictions.append((movie_id, pred.est))
+                    with open(top_movies_path, 'rb') as f:
+                        self.top_movies_per_cluster = pickle.load(f)
+                    logger.info(f"Películas top cargadas exitosamente: {len(self.top_movies_per_cluster)} clusters")
                 except Exception as e:
-                    logger.error(f"Error al predecir para película {movie_id}: {str(e)}")
+                    logger.error(f"Error al cargar películas top: {str(e)}")
+                    return False
+            else:
+                logger.error(f"No se encontró el archivo de películas top en {top_movies_path}")
+                return False
+
+            # Cargar modelos
+            model_files = list(self.models_dir.glob('svd_model_cluster_*.pkl'))
+            if not model_files:
+                logger.error("No se encontraron archivos de modelos en el directorio")
+                return False
+
+            logger.info(f"Encontrados {len(model_files)} archivos de modelos")
+            
+            for model_file in model_files:
+                try:
+                    cluster_id = int(model_file.stem.split('_')[-1])
+                    logger.info(f"Intentando cargar modelo para cluster {cluster_id} desde {model_file}")
+                    
+                    with open(model_file, 'rb') as f:
+                        model = pickle.load(f)
+                        if model is None:
+                            logger.error(f"El modelo cargado para cluster {cluster_id} es None")
+                            continue
+                        self.models[cluster_id] = model
+                        logger.info(f"Modelo cargado exitosamente para cluster {cluster_id}")
+                except Exception as e:
+                    logger.error(f"Error al cargar modelo para cluster {cluster_id}: {str(e)}")
                     continue
 
-            # Ordenar por rating predicho
-            predictions.sort(key=lambda x: x[1], reverse=True)
+            if not self.models:
+                logger.error("No se pudo cargar ningún modelo")
+                return False
 
-            # Obtener las películas recomendadas
-            recommended_movies = []
-            for movie_id, score in predictions[:n_recommendations]:
-                # Obtener detalles de la película
-                cursor.execute('''
-                SELECT 
-                    m.movie_id,
-                    m.title,
-                    m.release_date,
-                    m.poster_path,
-                    m.overview,
-                    m.vote_average,
-                    m.vote_count,
-                    GROUP_CONCAT(g.name) as genres
-                FROM movies m
-                LEFT JOIN movie_genres mg ON m.movie_id = mg.movie_id
-                LEFT JOIN genres g ON mg.genre_id = g.id
-                WHERE m.movie_id = ?
-                GROUP BY m.movie_id
-                ''', (movie_id,))
-                movie = cursor.fetchone()
-
-                if movie:
-                    # Convertir géneros de string a lista
-                    genres = movie[-1].split(',') if movie[-1] else []
-
-                    # Extraer el año de la fecha de lanzamiento
-                    year = movie[2].split('-')[0] if movie[2] else None
-
-                    recommended_movies.append({
-                        'movie_id': movie[0],
-                        'title': movie[1],
-                        'year': year,
-                        'poster_path': movie[3],
-                        'overview': movie[4],
-                        'vote_average': movie[5],
-                        'vote_count': movie[6],
-                        'genres': genres,
-                        'predicted_rating': float(score)
-                    })
-
-            logger.info(f"Recomendaciones generadas para cluster {cluster}: {len(recommended_movies)} películas")
-            for movie in recommended_movies:
-                logger.info(f"Película recomendada: {movie['title']} (Score: {movie['predicted_rating']:.2f})")
-
-            return recommended_movies
+            logger.info(f"Modelos cargados exitosamente para {len(self.models)} clusters")
+            return True
 
         except Exception as e:
-            logger.error(f"Error al obtener recomendaciones: {str(e)}")
+            logger.error(f"Error general al cargar modelos: {str(e)}")
+            return False
+
+    def train(self, n_epochs: int = 20, lr_all: float = 0.005, reg_all: float = 0.02, save_models: bool = True):
+        """Entrena un modelo SVD para cada cluster usando el número óptimo de componentes."""
+        try:
+            # Obtener todos los clusters únicos
+            with sqlite3.connect(self.db_path) as conn:
+                clusters = pd.read_sql_query("SELECT DISTINCT cluster FROM user_cluster", conn)['cluster'].tolist()
+
+            if not clusters:
+                logger.error("No se encontraron clusters en la base de datos")
+                return
+
+            logger.info(f"Entrenando modelos para {len(clusters)} clusters")
+            
+            for cluster_id in clusters:
+                logger.info(f"\n{'='*50}")
+                logger.info(f"Entrenando modelo para cluster {cluster_id}")
+                logger.info(f"{'='*50}")
+                
+                # Obtener películas top para este cluster
+                self.top_movies_per_cluster[cluster_id] = self._get_top_movies_per_cluster(cluster_id)
+                
+                # Obtener datos del cluster
+                cluster_data = self._get_cluster_data(cluster_id)
+                
+                if len(cluster_data) == 0:
+                    logger.warning(f"No hay datos para el cluster {cluster_id}")
+                    continue
+                
+                # Crear matriz de usuario-película para el cluster
+                self.user_movie_matrix = cluster_data.pivot_table(
+                    index='user_id',
+                    columns='movie_id',
+                    values='rating',
+                    fill_value=0
+                )
+                
+                logger.info(f"Dimensiones de la matriz para cluster {cluster_id}: {self.user_movie_matrix.shape}")
+                
+                # Analizar varianza y obtener número óptimo de componentes
+                logger.info(f"\nAnalizando varianza para cluster {cluster_id}...")
+                optimal_components = self._plot_variance_analysis(
+                    max_components=min(500, self.user_movie_matrix.shape[1]),
+                    cluster_id=cluster_id
+                )
+                
+                if optimal_components is None:
+                    logger.error(f"No se pudo determinar el número óptimo de componentes para cluster {cluster_id}")
+                    continue
+                
+                logger.info(f"\nNúmero óptimo de componentes para cluster {cluster_id}: {optimal_components}")
+                
+                # Crear y entrenar el modelo para este cluster usando el número óptimo de componentes
+                data = Dataset.load_from_df(cluster_data, self.reader)
+                trainset, testset = train_test_split(data, test_size=0.2, random_state=42)
+                
+                model = SVD(n_factors=optimal_components, n_epochs=n_epochs, lr_all=lr_all, reg_all=reg_all)
+                model.fit(trainset)
+                
+                # Guardar el modelo
+                self.models[cluster_id] = model
+                
+                # Evaluar el modelo
+                self.test_predictions = model.test(testset)
+                y_true = np.array([pred.r_ui for pred in self.test_predictions])
+                y_pred = np.array([pred.est for pred in self.test_predictions])
+                
+                metrics = self._calculate_metrics(y_true, y_pred)
+                logger.info(f"\nMétricas para cluster {cluster_id}:")
+                for metric_name, value in metrics.items():
+                    logger.info(f"{metric_name}: {value:.4f}")
+
+            # Guardar modelos si se solicita
+            if save_models:
+                self.save_models()
+                
+            logger.info("\nEntrenamiento completado exitosamente")
+            
+        except Exception as e:
+            logger.error(f"Error durante el entrenamiento: {str(e)}")
             raise
-        finally:
-            if 'conn' in locals():
-                conn.close()
+
+    def predict(self, user_id: int, movie_id: int) -> float:
+        """Realiza una predicción para un usuario y película específicos."""
+        # Obtener el cluster del usuario
+        with sqlite3.connect(self.db_path) as conn:
+            cluster_df = pd.read_sql_query(
+                "SELECT cluster FROM user_cluster WHERE user_id = ?",
+                conn,
+                params=(user_id,)
+            )
+            
+            if len(cluster_df) == 0:
+                logger.warning(f"Usuario {user_id} no encontrado en ningún cluster")
+                return 0.0
+                
+            cluster_id = cluster_df['cluster'].iloc[0]
+            
+            if cluster_id not in self.models:
+                logger.warning(f"No hay modelo para el cluster {cluster_id}")
+                return 0.0
+                
+            if movie_id not in self.top_movies_per_cluster[cluster_id]:
+                logger.warning(f"Película {movie_id} no está en las top 100 del cluster {cluster_id}")
+                return 0.0
+        
+        # Realizar la predicción usando el modelo del cluster
+        model = self.models[cluster_id]
+        prediction = model.predict(user_id, movie_id)
+        return prediction.est
+
+    def get_recommendations(self, user_id: int, n_recommendations: int = 10) -> List[Tuple[int, float]]:
+        """Obtiene recomendaciones para un usuario específico."""
+        try:
+            # Obtener el cluster del usuario
+            with sqlite3.connect(self.db_path) as conn:
+                cluster_df = pd.read_sql_query(
+                    "SELECT cluster FROM user_cluster WHERE user_id = ?",
+                    conn,
+                    params=(user_id,)
+                )
+                
+                if len(cluster_df) == 0:
+                    logger.warning(f"Usuario {user_id} no encontrado en ningún cluster")
+                    return []
+                    
+                cluster_id = cluster_df['cluster'].iloc[0]
+                logger.info(f"Usuario {user_id} pertenece al cluster {cluster_id}")
+                
+                if cluster_id not in self.models:
+                    logger.error(f"No hay modelo para el cluster {cluster_id}. Modelos disponibles: {list(self.models.keys())}")
+                    return []
+            
+            # Obtener películas ya vistas por el usuario
+            with sqlite3.connect(self.db_path) as conn:
+                viewed_movies = pd.read_sql_query(
+                    "SELECT movie_id FROM user_film WHERE user_id = ?",
+                    conn,
+                    params=(user_id,)
+                )['movie_id'].tolist()
+            
+            logger.info(f"Usuario {user_id} ha visto {len(viewed_movies)} películas")
+            
+            # Filtrar películas no vistas y que estén en las top 100 del cluster
+            available_movies = [
+                movie_id for movie_id in self.top_movies_per_cluster[cluster_id]
+                if movie_id not in viewed_movies
+            ]
+            
+            logger.info(f"Hay {len(available_movies)} películas disponibles para recomendar")
+            
+            # Realizar predicciones para todas las películas disponibles
+            predictions = []
+            model = self.models[cluster_id]
+            
+            for movie_id in available_movies:
+                pred = model.predict(user_id, movie_id)
+                predictions.append((movie_id, pred.est))
+            
+            # Ordenar por rating predicho
+            predictions.sort(key=lambda x: x[1], reverse=True)
+            
+            # Obtener las mejores y peores recomendaciones
+            best_recommendations = predictions[:n_recommendations]
+            worst_recommendations = predictions[-n_recommendations:]
+            
+            # Imprimir recomendaciones
+            logger.info(f"\nMejores recomendaciones para usuario {user_id}:")
+            for movie_id, score in best_recommendations:
+                logger.info(f"Película {movie_id}: {score:.4f}")
+                
+            logger.info(f"\nPeores recomendaciones para usuario {user_id}:")
+            for movie_id, score in worst_recommendations:
+                logger.info(f"Película {movie_id}: {score:.4f}")
+            
+            return best_recommendations
+            
+        except Exception as e:
+            logger.error(f"Error al obtener recomendaciones para usuario {user_id}: {str(e)}")
+            return []
 
 if __name__ == "__main__":
+    # Ejemplo de uso
     recommender = SVDRecommender()
-    recommender.train()
+    
+    # Ejemplo de recomendaciones
+    user_id = 1  # ID de usuario de ejemplo
+    recommendations = recommender.get_recommendations(user_id)
+    print(f"\nRecomendaciones para usuario {user_id}:")
+    for movie_id, score in recommendations:
+        print(f"Película {movie_id}: {score:.4f}")
