@@ -866,35 +866,42 @@ async def get_top_movies(limit: int = 10) -> List[Dict]:
     """Obtiene las películas mejor valoradas usando weighted rating al estilo IMDb."""
     try:
         # Calcular promedio global (C) y mínimo de votos requerido (m)
-        C = data['ratings']['rating'].mean()
-        m = 100  # mínimo de votos para que una película sea considerada
-
-        # Agrupar por película y calcular promedio y cantidad de votos
-        movie_ratings = data['ratings'].groupby('movieId').agg(
-            avg_rating=('rating', 'mean'),
-            rating_count=('rating', 'count')
-        ).reset_index()
+        # Calcular estadísticas de películas
+        movie_stats = (
+            data['ratings']
+            .groupby("movie_id")
+            .agg(R=("rating", "mean"), v=("rating", "count"))
+            .reset_index()
+        )
+        C = movie_stats["R"].mean()
+        m = movie_stats["v"].quantile(0.90)  #
 
         # Filtrar películas que cumplan con el mínimo de votos
-        qualified = movie_ratings[movie_ratings['rating_count'] >= m].copy()
+        qualified = movie_stats[movie_stats["v"] >= m].copy()
 
-        # Calcular weighted rating
-        qualified['weighted_rating'] = (
-            (qualified['rating_count'] / (qualified['rating_count'] + m)) * qualified['avg_rating'] +
-            (m / (qualified['rating_count'] + m)) * C
+        # Calcular score ponderado
+        qualified["score"] = (
+            (qualified["v"] / (qualified["v"] + m)) * qualified["R"] +
+            (m / (qualified["v"] + m)) * C
         )
 
-        # Ordenar por weighted rating descendente
-        top_movies = qualified.sort_values('weighted_rating', ascending=False).head(limit)
+        qualified = qualified.merge(
+            data['movies'][["movie_id", "title", "genres"]],
+            left_on="movie_id",
+            right_on="movie_id"
+        )
+
+        # Ordenar por score y obtener las mejores películas
+        top_movies = qualified.sort_values(by="score", ascending=False).head(limit)
 
         # Obtener datos completos de cada película
         movies_data = []
         for _, row in top_movies.iterrows():
-            movie_data = recommender._get_movie_data(int(row['movieId']))
+            movie_data = recommender._get_movie_data(int(row['movie_id']))
             if movie_data:
-                movie_data['average_rating'] = float(row['avg_rating'])
-                movie_data['rating_count'] = int(row['rating_count'])
-                movie_data['weighted_rating'] = float(row['weighted_rating'])
+                movie_data['average_rating'] = float(row['R'])
+                movie_data['rating_count'] = int(row['v'])
+                movie_data['weighted_score'] = float(row['score'])
                 movies_data.append(movie_data)
 
         return movies_data
